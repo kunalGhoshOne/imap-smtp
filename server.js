@@ -1,14 +1,20 @@
 const config = require('./config/config');
 const database = require('./config/database');
 const MultiPortSMTPServer = require('./services/MultiPortSMTPServer');
+const IMAPServer = require('./services/IMAPServer');
+const LMTPServer = require('./services/LMTPServer');
 const QueueAPI = require('./services/QueueAPI');
 const DatabaseWatcher = require('./services/DatabaseWatcher');
+const MailboxAPI = require('./services/MailboxAPI');
 const logger = require('./utils/logger');
 
 class Application {
   constructor() {
     this.multiPortSMTPServer = null;
+    this.imapServer = null;
+    this.lmtpServer = null;
     this.queueAPI = null;
+    this.mailboxAPI = null;
     this.isShuttingDown = false;
   }
 
@@ -25,9 +31,21 @@ class Application {
       this.multiPortSMTPServer = new MultiPortSMTPServer();
       this.multiPortSMTPServer.start();
       
+      // Start IMAP server
+      this.imapServer = new IMAPServer();
+      this.imapServer.start();
+      
+      // Start LMTP server
+      this.lmtpServer = new LMTPServer();
+      this.lmtpServer.start();
+      
       // Start Queue API server
       this.queueAPI = new QueueAPI(config.server.apiPort || 3000);
       this.queueAPI.start();
+
+      // Start Mailbox API server
+      this.mailboxAPI = new MailboxAPI();
+      this.mailboxAPI.start();
       
       logger.info('🚀 Application started successfully');
       
@@ -50,6 +68,21 @@ class Application {
       // Stop Multi-Port SMTP server
       if (this.multiPortSMTPServer) {
         this.multiPortSMTPServer.stop();
+      }
+      
+      // Stop IMAP server
+      if (this.imapServer) {
+        this.imapServer.stop();
+      }
+      
+      // Stop LMTP server
+      if (this.lmtpServer) {
+        this.lmtpServer.stop();
+      }
+
+      // Stop Mailbox API server
+      if (this.mailboxAPI) {
+        this.mailboxAPI.stop();
       }
       
       // Stop Database Watcher

@@ -28,6 +28,8 @@ smtp-nodejs/
 - **SMTP Protocol Support**: Full SMTP command handling (HELO, MAIL FROM, RCPT TO, DATA, QUIT, RSET)
 - **Email Processing**: MIME parsing with attachment support
 - **Multi-Port SMTP**: Support for ports 25 (forwarding), 587 (STARTTLS), and 465 (SSL)
+- **IMAP Server**: Support for ports 143 (no SSL) and 993 (SSL) for email retrieval
+- **LMTP Server**: Support for port 24 (no SSL) and 1024 (SSL) for local mail transfer
 - **Email Sending**: DNS MX lookup and external mail server delivery
 - **Dynamic IP Selection**: Send emails from different IP addresses based on API response
 - **Queue Management**: Robust email queue with retry logic and failure tracking
@@ -177,6 +179,27 @@ Dynamic IP selection:
 - Fallback IP support
 - Retry logic for API failures
 
+#### `MultiPortSMTPServer.js`
+Multi-port SMTP server:
+- Support for ports 25, 465, and 587
+- SSL/TLS support for secure connections
+- Port 25 forwarding to external SMTP servers
+- STARTTLS support for port 587
+
+#### `IMAPServer.js`
+IMAP server for email retrieval:
+- Support for ports 143 (no SSL) and 993 (SSL)
+- Basic IMAP commands (CAPABILITY, LOGIN, SELECT, FETCH, SEARCH, UID)
+- Database integration for email storage
+- SSL/TLS support for secure connections
+
+#### `LMTPServer.js`
+LMTP server for local mail transfer:
+- Support for port 24 (no SSL) and 1024 (SSL)
+- LMTP protocol implementation (LHLO, MAIL, RCPT, DATA, QUIT)
+- Database integration for email storage
+- SSL/TLS support for secure connections
+
 ### Utils Module (`utils/`)
 
 #### `logger.js`
@@ -251,6 +274,12 @@ npm run test:ip
 Test the multi-port SMTP functionality:
 ```bash
 npm run test:ports
+```
+
+### LMTP Test
+Test the LMTP server functionality:
+```bash
+npm run test:lmtp
 ```
 
 ### Manual Testing
