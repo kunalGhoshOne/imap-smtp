@@ -8,7 +8,7 @@ class EmailProcessor {
     this.maxSize = process.env.MAX_EMAIL_SIZE || 10 * 1024 * 1024; // 10MB
   }
 
-  async processEmail(sender, recipients, rawData) {
+  async processEmail(sender, recipients, rawData, authenticatedUsername = null) {
     try {
       // Validate email size
       if (rawData.length > this.maxSize) {
@@ -30,13 +30,18 @@ class EmailProcessor {
           filename: att.filename,
           contentType: att.contentType,
           content: att.content,
-        }))
+        })),
+        authenticatedUsername // Store the authenticated username
       };
 
       // Add to queue for sending
       const emailId = await EmailQueue.addToQueue(emailData);
       
-      logger.info('✅ Email added to queue', { emailId });
+      logger.info('✅ Email added to queue', { 
+        emailId, 
+        sender, 
+        authenticatedUsername: authenticatedUsername || 'anonymous' 
+      });
       return { success: true, message: 'Email queued for sending', emailId };
     } catch (error) {
       logger.error('❌ Email processing failed:', error.message);

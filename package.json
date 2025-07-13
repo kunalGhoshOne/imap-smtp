@@ -9,7 +9,8 @@
     "test:email": "node test-send.js",
     "test:ip": "node test-ip-selection.js",
     "test:ports": "node test-multi-port.js",
-    "test:lmtp": "node test-lmtp.js"
+    "test:lmtp": "node test-lmtp.js",
+    "test:auth": "node test-smtp-auth.js"
   },
   "author": "Kunal Ghosh",
   "license": "ISC",
@@ -19,6 +20,7 @@
     "ioredis": "^5.6.1",
     "mailparser": "^3.7.4",
     "mongoose": "^8.16.3",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "bcrypt": "^5.1.1"
   }
 }

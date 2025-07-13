@@ -14,9 +14,9 @@ const emailSchema = new mongoose.Schema({
   html: String,
   attachments: [attachmentSchema],
   raw: String,
-  createdAt: { type: Date, default: Date.now },
+  authenticatedUsername: String, // Track which mailbox user sent this email
   
-  // Queue management fields
+  // Queue management fields (for outgoing emails)
   status: { 
     type: String, 
     enum: ['pending', 'sent', 'failed', 'failed_permanent'], 
@@ -31,7 +31,13 @@ const emailSchema = new mongoose.Schema({
     response: mongoose.Schema.Types.Mixed,
     error: String
   }],
-  finalError: String
+  finalError: String,
+  
+  // References to related records
+  successfulEmailId: { type: mongoose.Schema.Types.ObjectId, ref: 'SuccessfulEmail' },
+  bouncedEmailId: { type: mongoose.Schema.Types.ObjectId, ref: 'BouncedEmail' },
+  
+  createdAt: { type: Date, default: Date.now }
 });
 
 module.exports = mongoose.model('Email', emailSchema); 

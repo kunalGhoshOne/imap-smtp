@@ -1,4 +1,6 @@
 const Email = require('../models/Email');
+const SuccessfulEmail = require('../models/SuccessfulEmail');
+const BouncedEmail = require('../models/BouncedEmail');
 const MailSender = require('./MailSender');
 const WebhookService = require('./WebhookService');
 const logger = require('../utils/logger');
@@ -145,10 +147,33 @@ class EmailQueue {
         // Email sent successfully
         emailDoc.status = 'sent';
         emailDoc.sentAt = new Date();
+        
+        // Create successful email record
+        const successfulEmail = new SuccessfulEmail({
+          originalEmailId: emailDoc._id,
+          sender: emailDoc.sender,
+          recipients: emailDoc.recipients,
+          subject: emailDoc.subject,
+          text: emailDoc.text,
+          html: emailDoc.html,
+          attachments: emailDoc.attachments,
+          raw: emailDoc.raw,
+          authenticatedUsername: emailDoc.authenticatedUsername,
+          deliveredAt: new Date(),
+          deliveryConfirmation: 'SMTP delivery confirmed',
+          messageId: emailDoc.sendAttempts[emailDoc.sendAttempts.length - 1]?.response?.messageId,
+          smtpResponse: JSON.stringify(result.results),
+          originalSentAt: emailDoc.sentAt,
+          originalStatus: emailDoc.status
+        });
+        
+        await successfulEmail.save();
+        emailDoc.successfulEmailId = successfulEmail._id;
         await emailDoc.save();
         
         logger.info('Email sent successfully', { 
           emailId: emailDoc._id, 
+          successfulEmailId: successfulEmail._id,
           recipients: emailDoc.recipients 
         });
 
@@ -191,10 +216,34 @@ class EmailQueue {
       // Max retries reached
       emailDoc.status = 'failed_permanent';
       emailDoc.finalError = this.getFinalError(result.results);
+      
+      // Create bounced email record
+      const bouncedEmail = new BouncedEmail({
+        originalEmailId: emailDoc._id,
+        sender: emailDoc.sender,
+        recipients: emailDoc.recipients,
+        subject: emailDoc.subject,
+        text: emailDoc.text,
+        html: emailDoc.html,
+        attachments: emailDoc.attachments,
+        raw: emailDoc.raw,
+        authenticatedUsername: emailDoc.authenticatedUsername,
+        bounceType: 'permanent',
+        bounceReason: 'Max retries exceeded',
+        bounceCode: 'PERMANENT_FAILURE',
+        bounceMessage: emailDoc.finalError,
+        bouncedAt: new Date(),
+        originalSentAt: emailDoc.sentAt,
+        originalStatus: emailDoc.status
+      });
+      
+      await bouncedEmail.save();
+      emailDoc.bouncedEmailId = bouncedEmail._id;
       await emailDoc.save();
       
       logger.error('Email permanently failed after max retries', { 
         emailId: emailDoc._id, 
+        bouncedEmailId: bouncedEmail._id,
         retryCount: emailDoc.retryCount,
         finalError: emailDoc.finalError
       });

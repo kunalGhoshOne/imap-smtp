@@ -3,7 +3,9 @@ const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
 const EmailProcessor = require('./EmailProcessor');
+const IncomingEmailProcessor = require('./IncomingEmailProcessor');
 const SMTPForwarder = require('./SMTPForwarder');
+const SMTPAuthService = require('./SMTPAuthService');
 const logger = require('../utils/logger');
 
 class MultiPortSMTPServer {
@@ -128,8 +130,10 @@ class MultiPortSMTPServer {
     let rawData = '';
     let isDataMode = false;
     let isAuthenticated = false;
+    let authenticatedUsername = null;
     let supportsStartTLS = false;
     let startTLSUpgraded = false;
+    let authState = 'none'; // none, waiting_username, waiting_password
 
     // Send welcome message
     socket.write('220 Multi-Port SMTP Server Ready\r\n');
@@ -143,7 +147,7 @@ class MultiPortSMTPServer {
         if (isDataMode) {
           if (line === '.') {
             isDataMode = false;
-            await this.handleEmailData(socket, sender, recipients, rawData, mode, port);
+            await this.handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername);
             
             // Reset state
             rawData = '';
@@ -159,11 +163,16 @@ class MultiPortSMTPServer {
           setSender: (s) => { sender = s; },
           addRecipient: (r) => { recipients.push(r); },
           setDataMode: (mode) => { isDataMode = mode; },
-          setAuthenticated: (auth) => { isAuthenticated = auth; },
+          setAuthenticated: (auth, username) => { 
+            isAuthenticated = auth; 
+            authenticatedUsername = username;
+          },
           setStartTLS: (tls) => { supportsStartTLS = tls; },
           getStartTLS: () => supportsStartTLS,
           isStartTLSUpgraded: () => startTLSUpgraded,
-          upgradeToTLS: () => { startTLSUpgraded = true; }
+          upgradeToTLS: () => { startTLSUpgraded = true; },
+          setAuthState: (state) => { authState = state; },
+          getAuthState: () => authState
         }, mode, port);
       }
     });
@@ -178,6 +187,29 @@ class MultiPortSMTPServer {
   }
 
   async handleSMTPCommand(socket, line, state, mode, port) {
+    // Handle authentication state for AUTH LOGIN
+    if (state.getAuthState() === 'waiting_username') {
+      const username = Buffer.from(line, 'base64').toString('utf8');
+      state.setAuthState('waiting_password');
+      socket.write('334 UGFzc3dvcmQ6\r\n'); // Base64 for "Password:"
+      return;
+    }
+
+    if (state.getAuthState() === 'waiting_password') {
+      const password = Buffer.from(line, 'base64').toString('utf8');
+      state.setAuthState('none');
+      
+      // Perform authentication
+      const authResult = await SMTPAuthService.authenticateUser(username, password);
+      if (authResult.success) {
+        state.setAuthenticated(true, authResult.username);
+        socket.write('235 Authentication successful\r\n');
+      } else {
+        socket.write('535 Authentication failed\r\n');
+      }
+      return;
+    }
+
     if (line.startsWith('HELO') || line.startsWith('EHLO')) {
       const domain = line.split(' ')[1] || 'localhost';
       
@@ -217,17 +249,41 @@ class MultiPortSMTPServer {
       });
 
     } else if (line.startsWith('AUTH')) {
-      // Handle authentication (basic implementation)
-      if (line.includes('PLAIN') || line.includes('LOGIN')) {
+      // Handle authentication
+      if (line.startsWith('AUTH PLAIN')) {
+        const authData = SMTPAuthService.parseAuthPlain(line);
+        if (authData) {
+          const authResult = await SMTPAuthService.authenticateUser(authData.username, authData.password);
+          if (authResult.success) {
+            state.setAuthenticated(true, authResult.username);
+            socket.write('235 Authentication successful\r\n');
+          } else {
+            socket.write('535 Authentication failed\r\n');
+          }
+        } else {
+          socket.write('501 Invalid authentication data\r\n');
+        }
+      } else if (line.startsWith('AUTH LOGIN')) {
+        state.setAuthState('waiting_username');
         socket.write('334 VXNlcm5hbWU6\r\n'); // Base64 for "Username:"
-        // For now, accept any authentication
-        isAuthenticated = true;
-        socket.write('235 Authentication successful\r\n');
       } else {
         socket.write('504 Authentication mechanism not supported\r\n');
       }
     } else if (line.startsWith('MAIL FROM:')) {
       const sender = line.slice(10).replace(/[<>]/g, '').trim();
+      
+      // Check if authentication is required for this port
+      if (SMTPAuthService.isAuthenticationRequired(port) && !state.isAuthenticated()) {
+        socket.write('530 Authentication required\r\n');
+        return;
+      }
+
+      // For authenticated users, validate sender
+      if (state.isAuthenticated() && !SMTPAuthService.validateSenderForAuthenticatedUser(sender, state.getAuthenticatedUsername())) {
+        socket.write('553 Sender not authorized\r\n');
+        return;
+      }
+
       if (EmailProcessor.validateSender(sender)) {
         state.setSender(sender);
         socket.write('250 OK\r\n');
@@ -259,15 +315,19 @@ class MultiPortSMTPServer {
     }
   }
 
-  async handleEmailData(socket, sender, recipients, rawData, mode, port) {
+  async handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername) {
     try {
       if (mode === 'forward' && this.forwarder) {
         // Forward email to external SMTP service
         await this.forwarder.forwardEmail(sender, recipients, rawData);
         socket.write('250 Message forwarded successfully\r\n');
+      } else if (authenticatedUsername) {
+        // Authenticated user - process as outgoing email
+        await EmailProcessor.processEmail(sender, recipients, rawData, authenticatedUsername);
+        socket.write('250 Message accepted for delivery\r\n');
       } else {
-        // Process email normally (add to queue)
-        await EmailProcessor.processEmail(sender, recipients, rawData);
+        // Unauthenticated user - process as incoming email
+        await IncomingEmailProcessor.processIncomingEmail(sender, recipients, rawData, 'SMTP');
         socket.write('250 Message accepted\r\n');
       }
     } catch (error) {
