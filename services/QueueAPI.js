@@ -3,6 +3,8 @@ const Email = require('../models/Email');
 const EmailQueue = require('./EmailQueue');
 const IPSelectionService = require('./IPSelectionService');
 const MultiPortSMTPServer = require('./MultiPortSMTPServer');
+const IMAPServer = require('./IMAPServer');
+const LMTPServer = require('./LMTPServer');
 const logger = require('../utils/logger');
 
 class QueueAPI {
@@ -182,6 +184,28 @@ class QueueAPI {
       }
     });
 
+    // IMAP Server endpoints
+    this.app.get('/api/imap/stats', (req, res) => {
+      try {
+        const stats = IMAPServer.getServerStats();
+        res.json({ success: true, data: stats });
+      } catch (error) {
+        logger.error('Failed to get IMAP server stats', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // LMTP Server endpoints
+    this.app.get('/api/lmtp/stats', (req, res) => {
+      try {
+        const stats = LMTPServer.getServerStats();
+        res.json({ success: true, data: stats });
+      } catch (error) {
+        logger.error('Failed to get LMTP server stats', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Simple dashboard
     this.app.get('/', (req, res) => {
       res.send(`
@@ -236,6 +260,16 @@ class QueueAPI {
           <div>
             <h2>SMTP Servers</h2>
             <div id="smtp-stats">Loading...</div>
+          </div>
+          
+          <div>
+            <h2>IMAP Server</h2>
+            <div id="imap-stats">Loading...</div>
+          </div>
+          
+          <div>
+            <h2>LMTP Server</h2>
+            <div id="lmtp-stats">Loading...</div>
           </div>
           
           <script>
@@ -356,11 +390,51 @@ class QueueAPI {
               }
             }
 
+            async function loadIMAPStats() {
+              try {
+                const response = await fetch('/api/imap/stats');
+                const data = await response.json();
+                if (data.success) {
+                  const stats = data.data;
+                  const imapHtml = \`
+                    <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;">
+                      <strong>IMAP Server</strong><br>
+                      <small>Status: \${stats.isRunning ? 'Running' : 'Stopped'} | Connections: \${stats.connections} | Port: \${stats.port} | SSL Port: \${stats.sslPort || 'N/A'}</small>
+                    </div>
+                  \`;
+                  document.getElementById('imap-stats').innerHTML = imapHtml;
+                }
+              } catch (error) {
+                console.error('Failed to load IMAP stats:', error);
+              }
+            }
+
+            async function loadLMTPStats() {
+              try {
+                const response = await fetch('/api/lmtp/stats');
+                const data = await response.json();
+                if (data.success) {
+                  const stats = data.data;
+                  const lmtpHtml = \`
+                    <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;">
+                      <strong>LMTP Server</strong><br>
+                      <small>Status: \${stats.isRunning ? 'Running' : 'Stopped'} | Connections: \${stats.connections} | Port: \${stats.port} | SSL Port: \${stats.sslPort || 'N/A'}</small>
+                    </div>
+                  \`;
+                  document.getElementById('lmtp-stats').innerHTML = lmtpHtml;
+                }
+              } catch (error) {
+                console.error('Failed to load LMTP stats:', error);
+              }
+            }
+
             // Load data on page load
             loadStats();
             loadEmails();
             loadIPStats();
             loadSMTPStats();
+            loadIMAPStats();
+            loadLMTPStats();
 
             // Refresh every 30 seconds
             setInterval(() => {
@@ -368,6 +442,8 @@ class QueueAPI {
               loadEmails();
               loadIPStats();
               loadSMTPStats();
+              loadIMAPStats();
+              loadLMTPStats();
             }, 30000);
           </script>
         </body>

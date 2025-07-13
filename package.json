@@ -8,7 +8,8 @@
     "test": "node test-send.js",
     "test:email": "node test-send.js",
     "test:ip": "node test-ip-selection.js",
-    "test:ports": "node test-multi-port.js"
+    "test:ports": "node test-multi-port.js",
+    "test:lmtp": "node test-lmtp.js"
   },
   "author": "Kunal Ghosh",
   "license": "ISC",
