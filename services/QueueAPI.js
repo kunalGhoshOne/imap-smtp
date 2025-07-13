@@ -2,6 +2,7 @@ const express = require('express');
 const Email = require('../models/Email');
 const EmailQueue = require('./EmailQueue');
 const IPSelectionService = require('./IPSelectionService');
+const MultiPortSMTPServer = require('./MultiPortSMTPServer');
 const logger = require('../utils/logger');
 
 class QueueAPI {
@@ -170,6 +171,17 @@ class QueueAPI {
       }
     });
 
+    // SMTP Server endpoints
+    this.app.get('/api/smtp/stats', (req, res) => {
+      try {
+        const stats = MultiPortSMTPServer.getServerStats();
+        res.json({ success: true, data: stats });
+      } catch (error) {
+        logger.error('Failed to get SMTP server stats', { error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Simple dashboard
     this.app.get('/', (req, res) => {
       res.send(`
@@ -219,6 +231,11 @@ class QueueAPI {
             <div id="ip-stats">Loading...</div>
             <button onclick="clearIPCache()">Clear IP Cache</button>
             <button onclick="testIPSelection()">Test IP Selection</button>
+          </div>
+          
+          <div>
+            <h2>SMTP Servers</h2>
+            <div id="smtp-stats">Loading...</div>
           </div>
           
           <script>
@@ -320,16 +337,37 @@ class QueueAPI {
               }
             }
 
+            async function loadSMTPStats() {
+              try {
+                const response = await fetch('/api/smtp/stats');
+                const data = await response.json();
+                if (data.success) {
+                  const stats = data.data;
+                  const smtpHtml = Object.entries(stats).map(([port, info]) => \`
+                    <div style="border: 1px solid #ddd; padding: 10px; margin: 5px 0; border-radius: 5px;">
+                      <strong>Port \${port}</strong> - \${info.mode.toUpperCase()}<br>
+                      <small>Status: \${info.status}</small>
+                    </div>
+                  \`).join('');
+                  document.getElementById('smtp-stats').innerHTML = smtpHtml;
+                }
+              } catch (error) {
+                console.error('Failed to load SMTP stats:', error);
+              }
+            }
+
             // Load data on page load
             loadStats();
             loadEmails();
             loadIPStats();
+            loadSMTPStats();
 
             // Refresh every 30 seconds
             setInterval(() => {
               loadStats();
               loadEmails();
               loadIPStats();
+              loadSMTPStats();
             }, 30000);
           </script>
         </body>

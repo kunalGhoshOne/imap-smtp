@@ -5,6 +5,19 @@ const config = {
     port: process.env.SMTP_PORT || 2525,
     host: process.env.SMTP_HOST || '0.0.0.0',
     apiPort: process.env.API_PORT || 3000,
+    ports: {
+      smtp25: process.env.SMTP_25_PORT || 25,
+      smtp465: process.env.SMTP_465_PORT || 465,
+      smtp587: process.env.SMTP_587_PORT || 587,
+    },
+    forward25: {
+      enabled: process.env.FORWARD_25_ENABLED === 'true',
+      smtpHost: process.env.FORWARD_25_HOST || 'smtp.gmail.com',
+      smtpPort: parseInt(process.env.FORWARD_25_PORT) || 587,
+      username: process.env.FORWARD_25_USERNAME,
+      password: process.env.FORWARD_25_PASSWORD,
+      secure: process.env.FORWARD_25_SECURE === 'true',
+    },
   },
   database: {
     url: process.env.MONGODB_URL || 'mongodb://localhost:27017/smtp-server',
