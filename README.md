@@ -27,6 +27,7 @@ smtp-nodejs/
 - **Modular Architecture**: Clean separation of concerns with dedicated modules
 - **SMTP Protocol Support**: Full SMTP command handling (HELO, MAIL FROM, RCPT TO, DATA, QUIT, RSET)
 - **Email Processing**: MIME parsing with attachment support
+- **Multi-Port SMTP**: Support for ports 25 (forwarding), 587 (STARTTLS), and 465 (SSL)
 - **Email Sending**: DNS MX lookup and external mail server delivery
 - **Dynamic IP Selection**: Send emails from different IP addresses based on API response
 - **Queue Management**: Robust email queue with retry logic and failure tracking
@@ -246,6 +247,12 @@ Test the dynamic IP selection functionality:
 npm run test:ip
 ```
 
+### Multi-Port SMTP Test
+Test the multi-port SMTP functionality:
+```bash
+npm run test:ports
+```
+
 ### Manual Testing
 To test the SMTP server manually, you can use any SMTP client or telnet:
 
@@ -282,6 +289,7 @@ Access the real-time queue dashboard at: http://localhost:3000
 - `GET /api/ip-selection/stats` - Get IP selection cache statistics
 - `POST /api/ip-selection/clear-cache` - Clear IP selection cache
 - `POST /api/ip-selection/test` - Test IP selection for specific email
+- `GET /api/smtp/stats` - Get multi-port SMTP server statistics
 - `GET /health` - Health check
 
 ## 📝 License

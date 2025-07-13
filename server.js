@@ -1,13 +1,13 @@
 const config = require('./config/config');
 const database = require('./config/database');
-const SMTPServer = require('./services/SMTPServer');
+const MultiPortSMTPServer = require('./services/MultiPortSMTPServer');
 const QueueAPI = require('./services/QueueAPI');
 const DatabaseWatcher = require('./services/DatabaseWatcher');
 const logger = require('./utils/logger');
 
 class Application {
   constructor() {
-    this.smtpServer = null;
+    this.multiPortSMTPServer = null;
     this.queueAPI = null;
     this.isShuttingDown = false;
   }
@@ -21,9 +21,9 @@ class Application {
       DatabaseWatcher.startWatching();
       await DatabaseWatcher.processExistingPendingEmails();
       
-      // Start SMTP server
-      this.smtpServer = new SMTPServer(config.server.port, config.server.host);
-      this.smtpServer.start();
+      // Start Multi-Port SMTP server
+      this.multiPortSMTPServer = new MultiPortSMTPServer();
+      this.multiPortSMTPServer.start();
       
       // Start Queue API server
       this.queueAPI = new QueueAPI(config.server.apiPort || 3000);
@@ -47,9 +47,9 @@ class Application {
     logger.info('🛑 Shutting down application...');
     
     try {
-      // Stop SMTP server
-      if (this.smtpServer) {
-        this.smtpServer.stop();
+      // Stop Multi-Port SMTP server
+      if (this.multiPortSMTPServer) {
+        this.multiPortSMTPServer.stop();
       }
       
       // Stop Database Watcher
