@@ -1,0 +1,5 @@
+
+
+export module.exports = ((data)=>{
+
+});
