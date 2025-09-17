@@ -36,8 +36,12 @@ class Application {
       this.imapServer.start();
       
       // Start LMTP server
-      this.lmtpServer = new LMTPServer();
-      this.lmtpServer.start();
+      try {
+        this.lmtpServer = new LMTPServer();
+        this.lmtpServer.start();
+      } catch (error) {
+        logger.warn('⚠️ LMTP server failed to start, continuing without it', error.message);
+      }
       
       // Start Queue API server
       this.queueAPI = new QueueAPI(config.server.apiPort || 3000);
