@@ -1,0 +1,12 @@
+version: "3.0"
+services:
+  mailserver:
+    # image: node:20
+    image: smtp-server
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    ports:
+      - 25:2525
+    volumes:
+      - ./:/usr/src/app
