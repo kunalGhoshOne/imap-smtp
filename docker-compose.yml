@@ -3,6 +3,7 @@ services:
   mailserver:
     # image: node:20
     image: smtp-server
+    container_name: imapsmtp
     build:
       context: ./
       dockerfile: Dockerfile
@@ -10,3 +11,13 @@ services:
       - 25:2525
     volumes:
       - ./:/usr/src/app
+    command: ["sleep", "850000"]
+    environment:
+      - MONGO_URL=mongodb://root:example@mongo:27017/emaildb?authSource=admin
+  mongo:
+    container_name: mongo
+    image: mongo:4
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+      MONGO_INITDB_DATABASE: emaildb

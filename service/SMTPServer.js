@@ -47,7 +47,7 @@ class SMTPServer {
         if (isDataMode) {
           if (line === ".") {
             isDataMode = false;
-            await this.SMTPEmailHandler(socket, sender, recipients, rawData);
+            await this.SMTPEmailHandler(socket, sender, recipients, subject, rawData);
 
             // Reset state for next transaction
             rawData = '';
@@ -78,10 +78,11 @@ class SMTPServer {
     });
   }
 
-  async SMTPEmailHandler(socket, sender, recipients, rawData) {
+  async SMTPEmailHandler(socket, sender, recipients, subject, rawData) {
     try {
       await EmailProcessor.processEmail(sender, recipients, subject, rawData);
       socket.write('250 Message accepted\r\n');
+      socket.end();
     } catch (error) {
       console.log('Error on email processor handling', error.message);
       socket.write('550 Failed to process email\r\n');
