@@ -6,6 +6,6 @@ COPY . .
 
 RUN chmod +x /usr/src/app/run.sh
 
-EXPOSE 25
+EXPOSE 25 143
 
 ENTRYPOINT ["/usr/src/app/run.sh"]

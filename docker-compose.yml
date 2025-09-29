@@ -9,6 +9,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - 25:2525
+      - 143:143
     volumes:
       - ./:/usr/src/app
     command: ["sleep", "850000"]

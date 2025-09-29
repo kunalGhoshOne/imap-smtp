@@ -1,4 +1,4 @@
-const mongo = require('../database/mongo/models');
+const mongo = require('../../database/mongo/models');
 const uuid = require('uuid');
 class EmailProcessor {
 
