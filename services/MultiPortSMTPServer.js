@@ -148,21 +148,28 @@ class MultiPortSMTPServer {
     let supportsStartTLS = false;
     let startTLSUpgraded = false;
     let authState = 'none'; // none, waiting_username, waiting_password
+    let authUsername = null;
 
     // Send welcome message
     socket.write('220 Multi-Port SMTP Server Ready\r\n');
 
     socket.on('data', async (chunk) => {
-      const lines = chunk.toString().split(/\r?\n/);
+      try {
+        const lines = chunk.toString().split(/\r?\n/);
 
-      for (let line of lines) {
-        line = line.trim();
+        for (let line of lines) {
+          line = line.trim();
 
         if (isDataMode) {
           if (line === '.') {
             isDataMode = false;
-            await this.handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername);
-            
+            try {
+              await this.handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername);
+            } catch (error) {
+              logger.error('Error handling email data', { error: error.message, port });
+              socket.write('550 Failed to process email\r\n');
+            }
+
             // Reset state
             rawData = '';
             sender = '';
@@ -173,7 +180,8 @@ class MultiPortSMTPServer {
           continue;
         }
 
-        await this.handleSMTPCommand(socket, line, {
+        try {
+          await this.handleSMTPCommand(socket, line, {
           setSender: (s) => { sender = s; },
           addRecipient: (r) => { recipients.push(r); },
           setDataMode: (mode) => { isDataMode = mode; },
@@ -186,8 +194,26 @@ class MultiPortSMTPServer {
           isStartTLSUpgraded: () => startTLSUpgraded,
           upgradeToTLS: () => { startTLSUpgraded = true; },
           setAuthState: (state) => { authState = state; },
-          getAuthState: () => authState
+          getAuthState: () => authState,
+          setAuthUsername: (username) => { authUsername = username; },
+          getAuthUsername: () => authUsername
         }, mode, port);
+        } catch (error) {
+          logger.error('Error handling SMTP command', { error: error.message, port, line });
+          try {
+            socket.write('550 Internal server error\r\n');
+          } catch (writeError) {
+            logger.error('Error writing to socket after command error', { error: writeError.message, port });
+          }
+        }
+      }
+      } catch (error) {
+        logger.error('Error processing socket data', { error: error.message, port });
+        try {
+          socket.write('550 Internal server error\r\n');
+        } catch (writeError) {
+          logger.error('Error writing to socket', { error: writeError.message, port });
+        }
       }
     });
 
@@ -204,21 +230,28 @@ class MultiPortSMTPServer {
     // Handle authentication state for AUTH LOGIN
     if (state.getAuthState() === 'waiting_username') {
       const username = Buffer.from(line, 'base64').toString('utf8');
+      state.setAuthUsername(username); // Store username for later use
       state.setAuthState('waiting_password');
       socket.write('334 UGFzc3dvcmQ6\r\n'); // Base64 for "Password:"
       return;
     }
 
     if (state.getAuthState() === 'waiting_password') {
+      const username = state.getAuthUsername(); // Get stored username
       const password = Buffer.from(line, 'base64').toString('utf8');
       state.setAuthState('none');
-      
-      // Perform authentication
-      const authResult = await SMTPAuthService.authenticateUser(username, password);
-      if (authResult.success) {
-        state.setAuthenticated(true, authResult.username);
-        socket.write('235 Authentication successful\r\n');
-      } else {
+
+      try {
+        // Perform authentication
+        const authResult = await SMTPAuthService.authenticateUser(username, password);
+        if (authResult.success) {
+          state.setAuthenticated(true, authResult.username);
+          socket.write('235 Authentication successful\r\n');
+        } else {
+          socket.write('535 Authentication failed\r\n');
+        }
+      } catch (error) {
+        logger.error('Authentication error during LOGIN', { error: error.message });
         socket.write('535 Authentication failed\r\n');
       }
       return;
@@ -267,11 +300,16 @@ class MultiPortSMTPServer {
       if (line.startsWith('AUTH PLAIN')) {
         const authData = SMTPAuthService.parseAuthPlain(line);
         if (authData) {
-          const authResult = await SMTPAuthService.authenticateUser(authData.username, authData.password);
-          if (authResult.success) {
-            state.setAuthenticated(true, authResult.username);
-            socket.write('235 Authentication successful\r\n');
-          } else {
+          try {
+            const authResult = await SMTPAuthService.authenticateUser(authData.username, authData.password);
+            if (authResult.success) {
+              state.setAuthenticated(true, authResult.username);
+              socket.write('235 Authentication successful\r\n');
+            } else {
+              socket.write('535 Authentication failed\r\n');
+            }
+          } catch (error) {
+            logger.error('Authentication error during PLAIN', { error: error.message });
             socket.write('535 Authentication failed\r\n');
           }
         } else {
@@ -293,7 +331,7 @@ class MultiPortSMTPServer {
       }
 
       // For authenticated users, validate sender
-      if (state.isAuthenticated() && !SMTPAuthService.validateSenderForAuthenticatedUser(sender, state.getAuthenticatedUsername())) {
+      if (isAuthenticated && !SMTPAuthService.validateSenderForAuthenticatedUser(sender, authenticatedUsername)) {
         socket.write('553 Sender not authorized\r\n');
         return;
       }
