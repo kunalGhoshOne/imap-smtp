@@ -1,1 +1,0 @@
-{"virtualbox":{"/mnt/components/":{"guestpath":"/mnt/components","hostpath":"/home/klent/Emailcluster","disabled":false,"__vagrantfile":true},"/vagrant":{"guestpath":"/vagrant","hostpath":"/home/klent/Emailcluster/smtp-nodejs","disabled":false,"__vagrantfile":true}}}
