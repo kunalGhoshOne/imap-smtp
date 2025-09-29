@@ -41,9 +41,17 @@ class MultiPortSMTPServer {
     if (mode === 'ssl') {
       // SSL server for port 465
       const sslOptions = this.getSSLOptions();
-      server = tls.createServer(sslOptions, (socket) => {
-        this.handleConnection(socket, mode, port);
-      });
+      if (sslOptions === null) {
+        // SSL disabled for development, use regular TCP server
+        logger.info(`Using regular TCP server for port ${port} (SSL disabled)`);
+        server = net.createServer((socket) => {
+          this.handleConnection(socket, 'plain', port);
+        });
+      } else {
+        server = tls.createServer(sslOptions, (socket) => {
+          this.handleConnection(socket, mode, port);
+        });
+      }
     } else {
       // Regular TCP server for ports 25 and 587
       server = net.createServer((socket) => {
@@ -63,6 +71,12 @@ class MultiPortSMTPServer {
   }
 
   getSSLOptions() {
+    // For development mode, disable SSL completely
+    if (process.env.NODE_ENV === 'development' || process.env.DISABLE_SSL === 'true') {
+      logger.info('SSL disabled for development mode');
+      return null;
+    }
+
     // Try to load SSL certificates
     const certPath = process.env.SSL_CERT_PATH || './ssl/cert.pem';
     const keyPath = process.env.SSL_KEY_PATH || './ssl/key.pem';

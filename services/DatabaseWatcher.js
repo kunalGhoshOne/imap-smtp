@@ -14,6 +14,13 @@ class DatabaseWatcher {
       return;
     }
 
+    // Check if change streams are supported (requires MongoDB replica set)
+    if (process.env.DISABLE_CHANGE_STREAMS === 'true') {
+      logger.info('Change streams disabled, using polling fallback');
+      this.startPolling();
+      return;
+    }
+
     try {
       // Create change stream to watch for new emails
       this.changeStream = Email.watch([
@@ -23,7 +30,9 @@ class DatabaseWatcher {
             'fullDocument.status': 'pending'
           }
         }
-      ]);
+      ], {
+        fullDocument: 'updateLookup'
+      });
 
       this.changeStream.on('change', async (change) => {
         try {
@@ -46,20 +55,20 @@ class DatabaseWatcher {
       });
 
       this.changeStream.on('error', (error) => {
-        logger.error('Change stream error', { error: error.message });
-        this.restartWatching();
+        logger.error('Change stream error, falling back to polling', { error: error.message });
+        this.fallbackToPolling();
       });
 
       this.changeStream.on('close', () => {
-        logger.warn('Change stream closed, attempting to restart');
-        this.restartWatching();
+        logger.warn('Change stream closed, falling back to polling');
+        this.fallbackToPolling();
       });
 
       this.isWatching = true;
       logger.info('Database watcher started successfully');
 
     } catch (error) {
-      logger.error('Failed to start database watcher', { error: error.message });
+      logger.error('Failed to start database watcher, using polling fallback', { error: error.message });
       // Fallback to polling if change streams are not available
       this.startPolling();
     }
@@ -70,13 +79,26 @@ class DatabaseWatcher {
       this.changeStream.close();
       this.changeStream = null;
     }
-    
+
     this.isWatching = false;
-    
+
     // Wait a bit before restarting
     setTimeout(() => {
       this.startWatching();
     }, 5000);
+  }
+
+  fallbackToPolling() {
+    if (this.changeStream) {
+      this.changeStream.close();
+      this.changeStream = null;
+    }
+
+    this.isWatching = false;
+
+    // Start polling instead of retrying change streams
+    logger.info('Switching to polling mode due to change stream issues');
+    this.startPolling();
   }
 
   startPolling() {

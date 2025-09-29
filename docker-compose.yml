@@ -5,10 +5,62 @@ services:
     build: .
     container_name: smtp-imap-app
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
       - MONGODB_URL=mongodb://mongo:27017/smtp-server
-      
-      # Add other environment variables as needed
+      - DISABLE_SSL=true
+      - DISABLE_CHANGE_STREAMS=true
+
+      # Mailbox API Configuration
+      - MAILBOX_API_PORT=8080
+      - MAILBOX_API_KEY=changeme
+
+      # Server Configuration
+      - SMTP_PORT=2525
+      - SMTP_HOST=0.0.0.0
+      - API_PORT=3000
+
+      # Multi-Port SMTP Configuration
+      - SMTP_25_PORT=25
+      - SMTP_465_PORT=465
+      - SMTP_587_PORT=587
+
+      # LMTP Configuration
+      - LMTP_24_PORT=24
+      - LMTP_PORT=24
+      - LMTP_SSL_PORT=1024
+      - LMTP_SSL_ENABLED=false
+
+      # IMAP Configuration
+      - IMAP_143_PORT=143
+      - IMAP_993_PORT=993
+      - IMAP_PORT=143
+      - IMAP_SSL_PORT=993
+      - IMAP_SSL_ENABLED=false
+
+      # Port 25 Forwarding Configuration
+      - FORWARD_25_ENABLED=false
+      - FORWARD_25_HOST=smtp.gmail.com
+      - FORWARD_25_PORT=587
+      - FORWARD_25_SECURE=true
+
+      # Email Configuration
+      - MAX_EMAIL_SIZE=10485760
+      - ALLOWED_DOMAINS=example.com,test.com
+
+      # Logging Configuration
+      - LOG_LEVEL=info
+      - ENABLE_CONSOLE_LOG=true
+
+      # Webhook Configuration
+      - WEBHOOK_ENABLED=false
+      - WEBHOOK_TIMEOUT=10000
+      - WEBHOOK_RETRIES=3
+
+      # IP Selection Configuration
+      - IP_SELECTION_ENABLED=false
+      - IP_SELECTION_TIMEOUT=5000
+      - IP_SELECTION_RETRIES=3
+      - FALLBACK_IP=127.0.0.1
     depends_on:
       - mongo
     # For multi-IP support, use host networking (Linux only)

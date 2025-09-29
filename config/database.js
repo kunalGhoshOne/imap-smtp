@@ -8,11 +8,8 @@ class Database {
 
   async connect() {
     try {
-      await mongoose.connect(process.env.MONGODB_URL, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      });
-      
+      await mongoose.connect(process.env.MONGODB_URL);
+
       this.isConnected = true;
       logger.info('✅ Connected to MongoDB');
     } catch (error) {
