@@ -1,5 +1,7 @@
 const { simpleParser } = require('mailparser');
 const IncomingEmail = require('../models/IncomingEmail');
+const Email = require('../models/Email');
+const Mailbox = require('../models/Mailbox');
 const logger = require('../utils/logger');
 
 class IncomingEmailProcessor {
@@ -17,7 +19,7 @@ class IncomingEmailProcessor {
       // Parse the email using mailparser
       const parsed = await simpleParser(rawData);
 
-      // Create incoming email document
+      // Create incoming email document (for archival/logging)
       const emailDoc = new IncomingEmail({
         sender,
         recipients,
@@ -37,19 +39,42 @@ class IncomingEmailProcessor {
       });
 
       await emailDoc.save();
-      
-      logger.info('✅ Incoming email stored', { 
-        emailId: emailDoc._id, 
-        sender, 
+
+      logger.info('✅ Incoming email stored', {
+        emailId: emailDoc._id,
+        sender,
         recipients: recipients.join(', '),
         source,
         subject: emailDoc.subject
       });
 
-      return { 
-        success: true, 
-        message: 'Incoming email stored successfully', 
-        emailId: emailDoc._id 
+      // Deliver to each recipient's mailbox
+      const deliveryResults = [];
+      for (const recipient of recipients) {
+        const result = await this.deliverToMailbox(recipient, parsed, rawData);
+        deliveryResults.push({
+          recipient,
+          ...result
+        });
+      }
+
+      // Log delivery summary
+      const successCount = deliveryResults.filter(r => r.success).length;
+      const failCount = deliveryResults.length - successCount;
+
+      logger.info('📬 Email delivery completed', {
+        incomingEmailId: emailDoc._id,
+        totalRecipients: recipients.length,
+        delivered: successCount,
+        failed: failCount,
+        details: deliveryResults
+      });
+
+      return {
+        success: true,
+        message: 'Incoming email processed and delivered',
+        emailId: emailDoc._id,
+        deliveryResults
       };
     } catch (error) {
       logger.error('❌ Incoming email processing failed:', error.message);
@@ -185,8 +210,101 @@ class IncomingEmailProcessor {
   }
 
   validateRecipients(recipients) {
-    return recipients && recipients.length > 0 && 
+    return recipients && recipients.length > 0 &&
            recipients.every(rcpt => rcpt.includes('@'));
+  }
+
+  /**
+   * Extract username from email address
+   * e.g., test@example.com -> test
+   */
+  extractUsername(email) {
+    if (!email || !email.includes('@')) {
+      return null;
+    }
+    return email.split('@')[0].toLowerCase();
+  }
+
+  /**
+   * Check if a mailbox exists for the given username
+   */
+  async mailboxExists(username) {
+    try {
+      const mailbox = await Mailbox.findOne({ username });
+      return !!mailbox;
+    } catch (error) {
+      logger.error('❌ Error checking mailbox existence:', error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Deliver email to user's mailbox in Email collection
+   * This makes the email visible via IMAP
+   */
+  async deliverToMailbox(recipient, parsed, rawData) {
+    try {
+      const username = this.extractUsername(recipient);
+
+      if (!username) {
+        logger.warn('⚠️ Cannot extract username from recipient', { recipient });
+        return { success: false, reason: 'invalid_recipient' };
+      }
+
+      // Check if mailbox exists
+      const mailboxExists = await this.mailboxExists(username);
+
+      if (!mailboxExists) {
+        logger.warn('⚠️ Mailbox does not exist for recipient', { recipient, username });
+        return { success: false, reason: 'no_mailbox' };
+      }
+
+      // Create email document for the user's mailbox
+      const emailDoc = new Email({
+        sender: parsed.from?.text || parsed.from?.value?.[0]?.address || '',
+        recipients: [recipient],
+        subject: parsed.subject || 'No Subject',
+        text: parsed.text || '',
+        html: parsed.html || '',
+        raw: rawData,
+        attachments: parsed.attachments.map(att => ({
+          filename: att.filename,
+          contentType: att.contentType,
+          content: att.content,
+        })),
+        mailbox: username, // Deliver to user's mailbox
+        messageId: parsed.messageId,
+        inReplyTo: parsed.inReplyTo,
+        references: parsed.references,
+        internalDate: new Date(),
+        // Set IMAP flags for new incoming message
+        flags: {
+          seen: false,
+          answered: false,
+          flagged: false,
+          deleted: false,
+          draft: false,
+          recent: true,
+          keywords: {}
+        }
+        // Note: uid will be auto-assigned by pre-save hook in Email model
+      });
+
+      await emailDoc.save();
+
+      logger.info('✅ Email delivered to mailbox', {
+        emailId: emailDoc._id,
+        recipient,
+        username,
+        uid: emailDoc.uid,
+        subject: emailDoc.subject
+      });
+
+      return { success: true, emailId: emailDoc._id, username };
+    } catch (error) {
+      logger.error('❌ Failed to deliver email to mailbox:', error.message);
+      return { success: false, reason: 'delivery_error', error: error.message };
+    }
   }
 }
 

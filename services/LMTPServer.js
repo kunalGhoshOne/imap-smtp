@@ -27,7 +27,7 @@ class LMTPServer {
       });
 
       // Start SSL LMTP server if SSL is enabled
-      if (config.lmtp.ssl && config.lmtp.sslPort) {
+      if (config.lmtp.ssl.enabled && config.lmtp.sslPort) {
         const sslOptions = this.getSSLOptions();
         this.sslServer = tls.createServer(sslOptions, (socket) => {
           this.handleConnection(socket, true);

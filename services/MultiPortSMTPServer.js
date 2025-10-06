@@ -160,6 +160,9 @@ class MultiPortSMTPServer {
         for (let line of lines) {
           line = line.trim();
 
+          // Skip empty lines
+          if (!line) continue;
+
         if (isDataMode) {
           if (line === '.') {
             isDataMode = false;
@@ -196,7 +199,9 @@ class MultiPortSMTPServer {
           setAuthState: (state) => { authState = state; },
           getAuthState: () => authState,
           setAuthUsername: (username) => { authUsername = username; },
-          getAuthUsername: () => authUsername
+          getAuthUsername: () => authUsername,
+          isAuthenticated: () => isAuthenticated,
+          getAuthenticatedUsername: () => authenticatedUsername
         }, mode, port);
         } catch (error) {
           logger.error('Error handling SMTP command', { error: error.message, port, line });
@@ -331,7 +336,7 @@ class MultiPortSMTPServer {
       }
 
       // For authenticated users, validate sender
-      if (isAuthenticated && !SMTPAuthService.validateSenderForAuthenticatedUser(sender, authenticatedUsername)) {
+      if (state.isAuthenticated() && !SMTPAuthService.validateSenderForAuthenticatedUser(sender, state.getAuthenticatedUsername())) {
         socket.write('553 Sender not authorized\r\n');
         return;
       }
