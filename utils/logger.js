@@ -17,8 +17,8 @@ class Logger {
       ...(data && { data })
     };
 
-    const logString = `[${timestamp}] ${level.toUpperCase()}: ${message}`;
-    
+    const logString = `[${timestamp}] ${level.toUpperCase()}: ${message}${data ? ' ' + JSON.stringify(data) : ''}`;
+
     switch (level.toLowerCase()) {
       case 'error':
         console.error(logString);
