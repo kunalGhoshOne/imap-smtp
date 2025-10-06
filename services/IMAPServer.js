@@ -530,11 +530,14 @@ class IMAPServer {
 
   async handleSelect(socket, args, state, tag) {
     const mailbox = (args[0] || 'INBOX').replace(/"/g, '');
+    const user = state.getUser();
 
     try {
-      // Get email count for the mailbox
-      const emailCount = await Email.countDocuments({ mailbox });
-      
+      // Get all emails for this user (folder doesn't matter, only user ownership)
+      const emailCount = await Email.countDocuments({
+        authenticatedUsername: user
+      });
+
       state.setMailbox(mailbox);
       state.setState('SELECTED');
       
@@ -555,22 +558,28 @@ class IMAPServer {
 
   async handleList(socket, args, state, tag) {
     try {
-      // Get all unique mailboxes from database
-      const mailboxes = await Email.distinct('mailbox');
+      const user = state.getUser();
 
-      // Always include INBOX even if empty
-      if (!mailboxes.includes('INBOX')) {
-        mailboxes.unshift('INBOX');
-      }
+      // Standard folders that every user should have
+      const standardFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam'];
+
+      // Get all unique mailboxes for this user from database
+      const existingMailboxes = await Email.distinct('mailbox', {
+        authenticatedUsername: user
+      });
+
+      // Combine standard folders with any custom folders the user has
+      const allMailboxes = new Set([...standardFolders, ...existingMailboxes]);
 
       // Send LIST response for each mailbox
-      for (const mb of mailboxes) {
+      for (const mb of allMailboxes) {
         let attributes = '\\HasNoChildren';
 
-        // Add special-use attributes
-        if (mb === 'Sent') attributes = '\\Sent \\HasNoChildren';
+        // Add special-use attributes (RFC 6154)
+        if (mb === 'INBOX') attributes = '\\HasNoChildren';
+        else if (mb === 'Sent') attributes = '\\Sent \\HasNoChildren';
         else if (mb === 'Trash') attributes = '\\Trash \\HasNoChildren';
-        else if (mb === 'Junk' || mb === 'Spam') attributes = '\\Junk \\HasNoChildren';
+        else if (mb === 'Spam' || mb === 'Junk') attributes = '\\Junk \\HasNoChildren';
         else if (mb === 'Drafts') attributes = '\\Drafts \\HasNoChildren';
 
         socket.write(`* LIST (${attributes}) "/" "${mb}"\r\n`);
@@ -588,7 +597,7 @@ class IMAPServer {
     const dataItems = args.slice(1).join(' ').toUpperCase();
 
     try {
-      const mailbox = state.getMailbox() || 'INBOX';
+      const user = state.getUser();
       const messageNumbers = this.parseMessageSet(messageSet);
 
       // Determine which fields we need
@@ -606,8 +615,8 @@ class IMAPServer {
         projection._id = 1;
       }
 
-      // Fetch emails sorted by internalDate
-      const emails = await Email.find({ mailbox }, projection)
+      // Fetch emails for this user (ignore folder, show all emails)
+      const emails = await Email.find(this.getUserEmailQuery(user), projection)
         .sort({ internalDate: 1 })
         .limit(Math.max(...messageNumbers));
 
@@ -700,13 +709,13 @@ class IMAPServer {
   async handleSearch(socket, args, state, tag) {
     try {
       const searchCriteria = args; // args already excludes tag and command
-      const mailbox = state.getMailbox() || 'INBOX';
+      const user = state.getUser();
 
       // Parse search criteria
       const mongoQuery = this.searchParser.parse(searchCriteria);
 
-      // Add mailbox filter
-      mongoQuery.mailbox = mailbox;
+      // Add user filter (ignore folder, search all user's emails)
+      mongoQuery.authenticatedUsername = user;
 
       // Execute search
       const emails = await Email.find(mongoQuery).sort({ internalDate: 1 });
@@ -723,7 +732,7 @@ class IMAPServer {
 
   async handleUID(socket, args, state, tag) {
     const subcommand = args[0]?.toUpperCase();
-    const mailbox = state.getMailbox() || 'INBOX';
+    const user = state.getUser();
 
     try {
       if (subcommand === 'FETCH') {
@@ -750,8 +759,11 @@ class IMAPServer {
           projection._id = 1;
         }
 
-        // Fetch all emails in one query
-        const emails = await Email.find({ mailbox, uid: { $in: uids } }, projection);
+        // Fetch all emails for this user with matching UIDs
+        const emails = await Email.find({
+          authenticatedUsername: user,
+          uid: { $in: uids }
+        }, projection);
 
         // Build responses
         for (const email of emails) {
@@ -810,7 +822,7 @@ class IMAPServer {
         const searchCriteria = args.slice(1);
 
         const mongoQuery = this.searchParser.parse(searchCriteria);
-        mongoQuery.mailbox = mailbox;
+        mongoQuery.authenticatedUsername = user;
 
         const emails = await Email.find(mongoQuery).sort({ internalDate: 1 });
 
@@ -835,7 +847,10 @@ class IMAPServer {
         const uids = this.parseMessageSet(uidSet);
 
         for (const uid of uids) {
-          const email = await Email.findOne({ mailbox, uid });
+          const email = await Email.findOne({
+            authenticatedUsername: user,
+            uid
+          });
           if (!email) continue;
 
           const emailCopy = new Email(email.toObject());
@@ -864,7 +879,10 @@ class IMAPServer {
         const uids = this.parseMessageSet(uidSet);
 
         for (const uid of uids) {
-          const email = await Email.findOne({ mailbox, uid });
+          const email = await Email.findOne({
+            authenticatedUsername: user,
+            uid
+          });
           if (!email) continue;
 
           if (!email.flags) {
@@ -930,11 +948,11 @@ class IMAPServer {
     try {
       // Parse: SORT (SORT_KEYS) CHARSET SEARCH_CRITERIA
       const sortData = this.sortParser.parse(args);
-      const mailbox = state.getMailbox() || 'INBOX';
+      const user = state.getUser();
 
       // Parse search criteria
       const mongoQuery = this.searchParser.parse(sortData.searchCriteria);
-      mongoQuery.mailbox = mailbox;
+      mongoQuery.authenticatedUsername = user;
 
       // Get MongoDB sort object
       const mongoSort = this.sortParser.toMongoSort(sortData.sortKeys);
@@ -1072,8 +1090,13 @@ class IMAPServer {
     return (maxUidEmail?.uid || 0) + 1;
   }
 
-  async getEmailBySequence(mailbox, sequenceNumber) {
-    return await Email.findOne({ mailbox })
+  // Helper: Get base query for user's emails (ignores folder, only filters by user)
+  getUserEmailQuery(username) {
+    return { authenticatedUsername: username };
+  }
+
+  async getEmailBySequence(username, sequenceNumber) {
+    return await Email.findOne(this.getUserEmailQuery(username))
       .sort({ internalDate: 1 })
       .skip(sequenceNumber - 1);
   }
@@ -1259,10 +1282,13 @@ class IMAPServer {
 
   async handleExpunge(socket, args, state, tag) {
     try {
-      const mailbox = state.getMailbox() || 'INBOX';
+      const user = state.getUser();
 
-      // Find and delete all messages marked as deleted
-      const deletedEmails = await Email.find({ mailbox, 'flags.deleted': true }).sort({ internalDate: 1 });
+      // Find and delete all messages marked as deleted for this user
+      const deletedEmails = await Email.find({
+        authenticatedUsername: user,
+        'flags.deleted': true
+      }).sort({ internalDate: 1 });
 
       for (let i = 0; i < deletedEmails.length; i++) {
         const email = deletedEmails[i];
@@ -1285,8 +1311,11 @@ class IMAPServer {
   async handleClose(socket, args, state, tag) {
     try {
       // Perform implicit EXPUNGE
-      const mailbox = state.getMailbox() || 'INBOX';
-      await Email.deleteMany({ mailbox, 'flags.deleted': true });
+      const user = state.getUser();
+      await Email.deleteMany({
+        authenticatedUsername: user,
+        'flags.deleted': true
+      });
 
       // Return to AUTHENTICATED state
       state.setMailbox(null);
@@ -1303,26 +1332,37 @@ class IMAPServer {
   async handleStatus(socket, args, state, tag) {
     try {
       const mailbox = args[0].replace(/"/g, '');
+      const user = state.getUser();
+
       const statusItems = args.slice(1).join(' ').replace(/[()]/g, '').split(' ').filter(s => s);
 
       const response = [];
 
+      // Query by user, not by mailbox (ignore folders)
+      const userQuery = this.getUserEmailQuery(user);
+
       for (const item of statusItems) {
         switch (item.toUpperCase()) {
           case 'MESSAGES':
-            const count = await Email.countDocuments({ mailbox });
+            const count = await Email.countDocuments(userQuery);
             response.push(`MESSAGES ${count}`);
             break;
           case 'RECENT':
-            const recentCount = await Email.countDocuments({ mailbox, 'flags.recent': true });
+            const recentCount = await Email.countDocuments({
+              ...userQuery,
+              'flags.recent': true
+            });
             response.push(`RECENT ${recentCount}`);
             break;
           case 'UNSEEN':
-            const unseenCount = await Email.countDocuments({ mailbox, 'flags.seen': { $ne: true } });
+            const unseenCount = await Email.countDocuments({
+              ...userQuery,
+              'flags.seen': { $ne: true }
+            });
             response.push(`UNSEEN ${unseenCount}`);
             break;
           case 'UIDNEXT':
-            const maxUid = await Email.findOne({ mailbox }).sort({ uid: -1 });
+            const maxUid = await Email.findOne(userQuery).sort({ uid: -1 });
             response.push(`UIDNEXT ${(maxUid?.uid || 0) + 1}`);
             break;
           case 'UIDVALIDITY':
@@ -1499,9 +1539,10 @@ class IMAPServer {
   async handleExamine(socket, args, state, tag) {
     try {
       const mailbox = (args[0] || 'INBOX').replace(/"/g, '');
+      const user = state.getUser();
 
-      // Same as SELECT but read-only
-      const emailCount = await Email.countDocuments({ mailbox });
+      // Same as SELECT but read-only - get all user's emails
+      const emailCount = await Email.countDocuments(this.getUserEmailQuery(user));
 
       state.setMailbox(mailbox);
       state.setState('SELECTED');

@@ -12,13 +12,17 @@ smtp-nodejs/
 │   ├── config.js     # Centralized configuration
 │   └── database.js   # Database connection management
 ├── models/           # Database models
-│   ├── Email.js      # Email schema and model
+│   ├── Email.js      # Email schema and model (outgoing & user mailboxes)
+│   ├── IncomingEmail.js # Incoming email archive
+│   ├── SuccessfulEmail.js # Successfully sent emails
+│   ├── BouncedEmail.js # Bounced/failed emails
 │   └── Mailbox.js    # Mailbox schema and model
 ├── services/         # Business logic services
 │   ├── MultiPortSMTPServer.js # Multi-port SMTP server
 │   ├── IMAPServer.js # IMAP server with modular commands
 │   ├── LMTPServer.js # LMTP server
-│   ├── EmailProcessor.js # Email processing logic
+│   ├── EmailProcessor.js # Outgoing email processing logic
+│   ├── IncomingEmailProcessor.js # Incoming email delivery to mailboxes
 │   ├── MailSender.js # External email delivery
 │   ├── EmailQueue.js # Queue management
 │   ├── QueueAPI.js   # Web dashboard and API
@@ -51,6 +55,7 @@ smtp-nodejs/
 - **Multi-Port SMTP**: Support for ports 25 (forwarding), 587 (STARTTLS), and 465 (SSL)
 - **IMAP Server**: Support for ports 143 (no SSL) and 993 (SSL) for email retrieval
 - **LMTP Server**: Support for port 24 (no SSL) and 1024 (SSL) for local mail transfer
+- **Incoming Email Delivery**: Automatic delivery of incoming emails from external servers to user mailboxes
 - **Mailbox Management**: REST API for creating, deleting, and managing mailboxes
 - **Email Sending**: DNS MX lookup and external mail server delivery
 - **Dynamic IP Selection**: Send emails from different IP addresses based on API response
@@ -218,6 +223,79 @@ All endpoints require the API key in the `x-api-key` header or `api_key` query p
     "newPassword": "newpassword"
   }
   ```
+
+## 📨 Incoming Email Delivery
+
+This server supports receiving emails from external mail servers (like Gmail, Outlook, etc.) and delivering them to user mailboxes for IMAP access.
+
+### How It Works
+
+```
+External Mail Server (Gmail)
+    ↓
+Port 25 (Unauthenticated SMTP)
+    ↓
+IncomingEmailProcessor
+    ↓
+    ├─> IncomingEmail collection (archival/logging)
+    └─> Email collection (user's mailbox for IMAP)
+```
+
+### Prerequisites
+
+**⚠️ Important**: A mailbox MUST exist before emails can be delivered to it.
+
+1. **Create a mailbox** using the Mailbox API:
+   ```bash
+   POST http://your-server:8080/api/mailboxes
+   Content-Type: application/json
+   x-api-key: your-api-key
+
+   {
+     "username": "test",
+     "password": "password123"
+   }
+   ```
+
+2. **Set up MX records** for your domain to point to your server's IP
+
+3. **Ensure port 25 is open** for incoming connections
+
+### Email Flow Example
+
+1. Someone at `sender@gmail.com` sends an email to `test@example.com`
+2. Gmail looks up the MX record for `example.com` → finds your server IP
+3. Gmail connects to your **port 25** (server-to-server, no authentication required)
+4. Your SMTP server accepts the email
+5. **IncomingEmailProcessor** processes it:
+   - Stores in `IncomingEmail` collection (for archival/logging)
+   - **Delivers to user's mailbox** in `Email` collection with `mailbox="test"`
+6. User connects via **IMAP** (port 143 or 993) and logs in with username `test`
+7. User sees the email in their inbox!
+
+### Delivery Behavior
+
+- ✅ **If mailbox exists**: Email is delivered to the user's mailbox (visible via IMAP)
+- ❌ **If mailbox doesn't exist**: Email is stored in `IncomingEmail` collection only (NOT visible via IMAP)
+- 📊 **Logs**: Check logs for `✅ Email delivered to mailbox` to confirm successful delivery
+
+### Testing Incoming Email
+
+Run the test script to simulate an external server sending an email:
+
+```bash
+# Inside Docker container
+docker exec smtp-imap-app node test-incoming-delivery.js
+
+# Or via Vagrant
+vagrant ssh -c "sudo docker exec smtp-imap-app node test-incoming-delivery.js"
+```
+
+This test:
+1. Creates a test mailbox (`testuser`)
+2. Simulates Gmail sending an email to `testuser@example.com`
+3. Verifies the email is delivered to the mailbox
+4. Confirms it's accessible via IMAP
 
 ## 🔧 Protocol Commands Supported
 

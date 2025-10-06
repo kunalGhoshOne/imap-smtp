@@ -16,7 +16,7 @@ const emailSchema = new mongoose.Schema({
   html: String,
   attachments: [attachmentSchema],
   raw: String,
-  authenticatedUsername: String, // Track which mailbox user sent this email
+  authenticatedUsername: { type: String, required: true, index: true }, // Owner of this email (REQUIRED)
 
   // IMAP-specific fields
   mailbox: { type: String, default: 'INBOX' },

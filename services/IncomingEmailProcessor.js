@@ -272,7 +272,8 @@ class IncomingEmailProcessor {
           contentType: att.contentType,
           content: att.content,
         })),
-        mailbox: username, // Deliver to user's mailbox
+        mailbox: 'INBOX', // Folder name (can be moved to Spam, Trash, etc. later)
+        authenticatedUsername: username, // Owner of this email (THIS is the important field for queries)
         messageId: parsed.messageId,
         inReplyTo: parsed.inReplyTo,
         references: parsed.references,
