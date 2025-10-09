@@ -533,9 +533,10 @@ class IMAPServer {
     const user = state.getUser();
 
     try {
-      // Get all emails for this user (folder doesn't matter, only user ownership)
+      // Get emails for this user in the selected mailbox
       const emailCount = await Email.countDocuments({
-        authenticatedUsername: user
+        authenticatedUsername: user,
+        mailbox: mailbox
       });
 
       state.setMailbox(mailbox);
@@ -598,6 +599,7 @@ class IMAPServer {
 
     try {
       const user = state.getUser();
+      const mailbox = state.getMailbox() || 'INBOX';
       const messageNumbers = this.parseMessageSet(messageSet);
 
       // Determine which fields we need
@@ -606,6 +608,11 @@ class IMAPServer {
       if (dataItems.includes('RFC822') || dataItems.includes('BODY')) {
         projection.raw = 1;
         projection.text = 1;
+        projection.sender = 1;
+        projection.recipients = 1;
+        projection.subject = 1;
+        projection.messageId = 1;
+        projection.createdAt = 1;
       }
       if (dataItems.includes('ENVELOPE')) {
         projection.sender = 1;
@@ -615,8 +622,8 @@ class IMAPServer {
         projection._id = 1;
       }
 
-      // Fetch emails for this user (ignore folder, show all emails)
-      const emails = await Email.find(this.getUserEmailQuery(user), projection)
+      // Fetch emails for this user in the selected mailbox
+      const emails = await Email.find(this.getUserEmailQuery(user, mailbox), projection)
         .sort({ internalDate: 1 })
         .limit(Math.max(...messageNumbers));
 
@@ -626,6 +633,11 @@ class IMAPServer {
 
         const fetchResponse = [];
         let literalData = null;
+        let literalLabel = '';
+
+        if (dataItems.includes('UID')) {
+          fetchResponse.push(`UID ${email.uid}`);
+        }
 
         if (dataItems.includes('FLAGS')) {
           const flagsStr = this.formatFlags(email.flags || {});
@@ -636,27 +648,9 @@ class IMAPServer {
           fetchResponse.push(`RFC822.SIZE ${email.raw ? email.raw.length : 0}`);
         }
 
-        // Handle BODY.PEEK[HEADER.FIELDS ...] - most common
-        if (dataItems.includes('BODY.PEEK[HEADER.FIELDS') || dataItems.includes('BODY[HEADER.FIELDS')) {
-          const headers = this.extractHeaders(email.raw || '');
-          fetchResponse.push(`BODY[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To)] {${headers.length}}`);
-          literalData = headers;
-        } else if (dataItems.includes('RFC822.HEADER')) {
-          const headers = this.extractHeaders(email.raw || '');
-          fetchResponse.push(`RFC822.HEADER {${headers.length}}`);
-          literalData = headers;
-        } else if (dataItems.includes('RFC822.TEXT') || dataItems.includes('RFC822')) {
-          const body = email.raw || '';
-          fetchResponse.push(`RFC822 {${body.length}}`);
-          literalData = body;
-        } else if (dataItems.includes('BODY[]') || dataItems.includes('BODY.PEEK[]')) {
-          const body = email.raw || '';
-          fetchResponse.push(`BODY[] {${body.length}}`);
-          literalData = body;
-        } else if (dataItems.includes('BODYSTRUCTURE')) {
-          fetchResponse.push(`BODYSTRUCTURE ("text" "plain" ("charset" "UTF-8") NIL NIL "7bit" ${email.text ? email.text.length : 0} ${email.text ? email.text.split('\n').length : 0})`);
-        } else if (dataItems.includes('BODY') && !dataItems.includes('BODY[')) {
-          fetchResponse.push(`BODY ("text" "plain" ("charset" "UTF-8") NIL NIL "7bit" ${email.text ? email.text.length : 0})`);
+        if (dataItems.includes('INTERNALDATE')) {
+          const date = email.internalDate || email.createdAt;
+          fetchResponse.push(`INTERNALDATE "${this.formatInternalDate(date)}"`);
         }
 
         if (dataItems.includes('ENVELOPE')) {
@@ -664,18 +658,36 @@ class IMAPServer {
           fetchResponse.push(`ENVELOPE ${envelope}`);
         }
 
-        if (dataItems.includes('UID')) {
-          fetchResponse.push(`UID ${email.uid}`);
+        if (dataItems.includes('BODYSTRUCTURE')) {
+          fetchResponse.push(`BODYSTRUCTURE ("text" "plain" ("charset" "UTF-8") NIL NIL "7bit" ${email.text ? email.text.length : 0} ${email.text ? email.text.split('\n').length : 0})`);
+        } else if (dataItems.includes('BODY') && !dataItems.includes('BODY[')) {
+          fetchResponse.push(`BODY ("text" "plain" ("charset" "UTF-8") NIL NIL "7bit" ${email.text ? email.text.length : 0})`);
         }
 
-        if (dataItems.includes('INTERNALDATE')) {
-          const date = email.internalDate || email.createdAt;
-          fetchResponse.push(`INTERNALDATE "${this.formatInternalDate(date)}"`);
+        // Handle literals LAST (they must come at the end of the response)
+        if (dataItems.includes('BODY.PEEK[HEADER.FIELDS') || dataItems.includes('BODY[HEADER.FIELDS')) {
+          const headers = this.extractHeaders(email.raw || '');
+          literalLabel = `BODY[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To)] {${headers.length}}`;
+          literalData = headers;
+        } else if (dataItems.includes('RFC822.HEADER')) {
+          const headers = this.extractHeaders(email.raw || '');
+          literalLabel = `RFC822.HEADER {${headers.length}}`;
+          literalData = headers;
+        } else if (dataItems.includes('RFC822.TEXT') || dataItems.includes('RFC822')) {
+          const body = this.buildCompleteMessage(email);
+          literalLabel = `RFC822 {${body.length}}`;
+          literalData = body;
+        } else if (dataItems.includes('BODY[]') || dataItems.includes('BODY.PEEK[]')) {
+          const body = this.buildCompleteMessage(email);
+          literalLabel = `BODY[] {${body.length}}`;
+          literalData = body;
         }
 
         // Write FETCH response with proper literal formatting
         if (literalData) {
-          socket.write(`* ${msgNum} FETCH (${fetchResponse.join(' ')}\r\n${literalData})\r\n`);
+          socket.write(`* ${msgNum} FETCH (${fetchResponse.join(' ')} ${literalLabel}\r\n`);
+          socket.write(literalData);
+          socket.write(`)\r\n`);
         } else {
           socket.write(`* ${msgNum} FETCH (${fetchResponse.join(' ')})\r\n`);
         }
@@ -710,12 +722,14 @@ class IMAPServer {
     try {
       const searchCriteria = args; // args already excludes tag and command
       const user = state.getUser();
+      const mailbox = state.getMailbox() || 'INBOX';
 
       // Parse search criteria
       const mongoQuery = this.searchParser.parse(searchCriteria);
 
-      // Add user filter (ignore folder, search all user's emails)
+      // Add user and mailbox filters
       mongoQuery.authenticatedUsername = user;
+      mongoQuery.mailbox = mailbox;
 
       // Execute search
       const emails = await Email.find(mongoQuery).sort({ internalDate: 1 });
@@ -733,12 +747,15 @@ class IMAPServer {
   async handleUID(socket, args, state, tag) {
     const subcommand = args[0]?.toUpperCase();
     const user = state.getUser();
+    const mailbox = state.getMailbox() || 'INBOX';
 
     try {
       if (subcommand === 'FETCH') {
         // UID FETCH - fetch by UID instead of sequence number
         const uidSet = args[1];
         const dataItems = args.slice(2).join(' ').toUpperCase();
+
+        logger.info('UID FETCH dataItems', { dataItems, uidSet });
 
         const uids = this.parseMessageSet(uidSet);
 
@@ -747,6 +764,7 @@ class IMAPServer {
         if (dataItems.includes('FLAGS')) projection.flags = 1;
         if (dataItems.includes('RFC822') || dataItems.includes('BODY') || dataItems.includes('INTERNALDATE')) {
           projection.raw = 1;
+          projection.text = 1;
           projection.internalDate = 1;
           projection.createdAt = 1;
         }
@@ -757,11 +775,13 @@ class IMAPServer {
           projection.text = 1;
           projection.createdAt = 1;
           projection._id = 1;
+          projection.messageId = 1;
         }
 
-        // Fetch all emails for this user with matching UIDs
+        // Fetch emails for this user in the selected mailbox with matching UIDs
         const emails = await Email.find({
           authenticatedUsername: user,
+          mailbox: mailbox,
           uid: { $in: uids }
         }, projection);
 
@@ -769,6 +789,10 @@ class IMAPServer {
         for (const email of emails) {
           const fetchResponse = [];
           let literalData = null;
+          let literalLabel = '';
+
+          // Always include UID first
+          fetchResponse.push(`UID ${email.uid}`);
 
           if (dataItems.includes('FLAGS')) {
             const flagsStr = this.formatFlags(email.flags || {});
@@ -779,15 +803,9 @@ class IMAPServer {
             fetchResponse.push(`RFC822.SIZE ${email.raw ? email.raw.length : 0}`);
           }
 
-          // Handle BODY.PEEK[HEADER.FIELDS ...] - most common request from Thunderbird
-          if (dataItems.includes('BODY.PEEK[HEADER.FIELDS') || dataItems.includes('BODY[HEADER.FIELDS')) {
-            const headers = this.extractHeaders(email.raw || '');
-            fetchResponse.push(`BODY[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To)] {${headers.length}}`);
-            literalData = headers;
-          } else if (dataItems.includes('RFC822') || dataItems.includes('BODY[]')) {
-            const body = email.raw || '';
-            fetchResponse.push(`BODY[] {${body.length}}`);
-            literalData = body;
+          if (dataItems.includes('INTERNALDATE')) {
+            const date = email.internalDate || email.createdAt;
+            fetchResponse.push(`INTERNALDATE "${this.formatInternalDate(date)}"`);
           }
 
           if (dataItems.includes('ENVELOPE')) {
@@ -799,17 +817,27 @@ class IMAPServer {
             fetchResponse.push(`BODYSTRUCTURE ("text" "plain" ("charset" "UTF-8") NIL NIL "7bit" ${email.text ? email.text.length : 0} ${email.text ? email.text.split('\n').length : 0})`);
           }
 
-          if (dataItems.includes('INTERNALDATE')) {
-            const date = email.internalDate || email.createdAt;
-            fetchResponse.push(`INTERNALDATE "${this.formatInternalDate(date)}"`);
+          // Handle literals LAST (they must come at the end of the response)
+          if (dataItems.includes('BODY.PEEK[HEADER.FIELDS') || dataItems.includes('BODY[HEADER.FIELDS')) {
+            const headers = this.extractHeaders(email.raw || '');
+            literalLabel = `BODY[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To)] {${headers.length}}`;
+            literalData = headers;
+          } else if (dataItems.includes('RFC822') || dataItems.includes('BODY[]') || dataItems.includes('BODY.PEEK[]')) {
+            // Build complete RFC822 message (headers + body)
+            const body = this.buildCompleteMessage(email);
+            literalLabel = `BODY[] {${body.length}}`;
+            literalData = body;
           }
-
-          // Always include UID in response
-          fetchResponse.push(`UID ${email.uid}`);
 
           // Write FETCH response with proper literal formatting
           if (literalData) {
-            socket.write(`* ${email.uid} FETCH (${fetchResponse.join(' ')}\r\n${literalData})\r\n`);
+            // Proper IMAP literal format:
+            // * <uid> FETCH (UID 5 FLAGS (...) BODY[] {476}
+            // <literal data>)
+            logger.info('Sending literal data', { uid: email.uid, literalLabel, literalLength: literalData.length });
+            socket.write(`* ${email.uid} FETCH (${fetchResponse.join(' ')} ${literalLabel}\r\n`);
+            socket.write(literalData);
+            socket.write(`)\r\n`);
           } else {
             socket.write(`* ${email.uid} FETCH (${fetchResponse.join(' ')})\r\n`);
           }
@@ -823,13 +851,14 @@ class IMAPServer {
 
         const mongoQuery = this.searchParser.parse(searchCriteria);
         mongoQuery.authenticatedUsername = user;
+        mongoQuery.mailbox = mailbox;
 
         const emails = await Email.find(mongoQuery).sort({ internalDate: 1 });
 
         // Ensure all emails have UIDs
         for (const email of emails) {
           if (!email.uid) {
-            email.uid = await this.getNextUID(mailbox);
+            email.uid = await this.getNextUID(user, mailbox);
             await email.save();
           }
         }
@@ -849,6 +878,7 @@ class IMAPServer {
         for (const uid of uids) {
           const email = await Email.findOne({
             authenticatedUsername: user,
+            mailbox: mailbox,
             uid
           });
           if (!email) continue;
@@ -857,7 +887,7 @@ class IMAPServer {
           emailCopy._id = undefined;
           emailCopy.isNew = true;
           emailCopy.mailbox = destMailbox;
-          emailCopy.uid = await this.getNextUID(destMailbox);
+          emailCopy.uid = await this.getNextUID(user, destMailbox);
           emailCopy.flags = { ...email.flags.toObject ? email.flags.toObject() : email.flags };
           emailCopy.flags.recent = true;
 
@@ -881,6 +911,7 @@ class IMAPServer {
         for (const uid of uids) {
           const email = await Email.findOne({
             authenticatedUsername: user,
+            mailbox: mailbox,
             uid
           });
           if (!email) continue;
@@ -914,6 +945,31 @@ class IMAPServer {
 
         socket.write(`${tag} OK UID STORE completed\r\n`);
 
+      } else if (subcommand === 'MOVE') {
+        // UID MOVE
+        const uidSet = args[1];
+        const destMailbox = args[2].replace(/"/g, '');
+
+        const uids = this.parseMessageSet(uidSet);
+
+        for (const uid of uids) {
+          const email = await Email.findOne({
+            authenticatedUsername: user,
+            mailbox: mailbox,
+            uid
+          });
+          if (!email) continue;
+
+          // Move email to new mailbox
+          email.mailbox = destMailbox;
+          email.uid = await this.getNextUID(user, destMailbox);
+          email.flags.recent = true; // Mark as recent in new mailbox
+
+          await email.save();
+        }
+
+        socket.write(`${tag} OK UID MOVE completed\r\n`);
+
       } else {
         socket.write(`${tag} BAD Unknown UID command: ${subcommand}\r\n`);
       }
@@ -926,12 +982,38 @@ class IMAPServer {
   extractHeaders(rawEmail) {
     const lines = rawEmail.split('\r\n');
     const headers = [];
-    
+
     for (const line of lines) {
       if (line === '') break; // End of headers
       headers.push(line);
     }
-    
+
+    return headers.join('\r\n') + '\r\n';
+  }
+
+  buildCompleteMessage(email) {
+    // If raw contains the full message (headers + body), use it
+    if (email.raw && email.raw.includes('\r\n\r\n')) {
+      return email.raw;
+    }
+
+    // Otherwise, build from headers + body
+    const headers = email.raw || this.buildHeadersFromEmail(email);
+    const body = email.text || '';
+
+    // RFC822 format: headers, blank line, body
+    return headers + '\r\n' + body;
+  }
+
+  buildHeadersFromEmail(email) {
+    // Build basic headers if raw is not available
+    const headers = [];
+    if (email.sender) headers.push(`From: ${email.sender}`);
+    if (email.recipients && email.recipients.length > 0) headers.push(`To: ${email.recipients.join(', ')}`);
+    if (email.subject) headers.push(`Subject: ${email.subject}`);
+    if (email.messageId) headers.push(`Message-ID: <${email.messageId}>`);
+    if (email.createdAt) headers.push(`Date: ${email.createdAt.toUTCString()}`);
+    headers.push('Content-Type: text/plain; charset=UTF-8');
     return headers.join('\r\n') + '\r\n';
   }
 
@@ -1082,21 +1164,28 @@ class IMAPServer {
     return subject.replace(/^(Re|Fwd|Fw):\s*/gi, '').trim().toLowerCase();
   }
 
-  async getNextUID(mailbox) {
-    const maxUidEmail = await Email.findOne({ mailbox })
+  async getNextUID(user, mailbox) {
+    const maxUidEmail = await Email.findOne({
+      authenticatedUsername: user,
+      mailbox: mailbox
+    })
       .sort({ uid: -1 })
       .select('uid');
 
     return (maxUidEmail?.uid || 0) + 1;
   }
 
-  // Helper: Get base query for user's emails (ignores folder, only filters by user)
-  getUserEmailQuery(username) {
-    return { authenticatedUsername: username };
+  // Helper: Get base query for user's emails
+  getUserEmailQuery(username, mailbox = null) {
+    const query = { authenticatedUsername: username };
+    if (mailbox) {
+      query.mailbox = mailbox;
+    }
+    return query;
   }
 
-  async getEmailBySequence(username, sequenceNumber) {
-    return await Email.findOne(this.getUserEmailQuery(username))
+  async getEmailBySequence(username, mailbox, sequenceNumber) {
+    return await Email.findOne(this.getUserEmailQuery(username, mailbox))
       .sort({ internalDate: 1 })
       .skip(sequenceNumber - 1);
   }
@@ -1114,10 +1203,11 @@ class IMAPServer {
 
       // Parse message set
       const messageNumbers = this.parseMessageSet(messageSet);
+      const user = state.getUser();
       const mailbox = state.getMailbox() || 'INBOX';
 
       for (const msgNum of messageNumbers) {
-        const email = await this.getEmailBySequence(mailbox, msgNum);
+        const email = await this.getEmailBySequence(user, mailbox, msgNum);
 
         if (!email) continue;
 
@@ -1211,13 +1301,14 @@ class IMAPServer {
     try {
       const messageSet = args[0];
       const destMailbox = args[1].replace(/"/g, '');
+      const user = state.getUser();
       const sourceMailbox = state.getMailbox() || 'INBOX';
 
       const messageNumbers = this.parseMessageSet(messageSet);
       const copiedUids = [];
 
       for (const msgNum of messageNumbers) {
-        const email = await this.getEmailBySequence(sourceMailbox, msgNum);
+        const email = await this.getEmailBySequence(user, sourceMailbox, msgNum);
 
         if (!email) continue;
 
@@ -1226,7 +1317,7 @@ class IMAPServer {
         emailCopy._id = undefined;
         emailCopy.isNew = true;
         emailCopy.mailbox = destMailbox;
-        emailCopy.uid = await this.getNextUID(destMailbox);
+        emailCopy.uid = await this.getNextUID(user, destMailbox);
         emailCopy.flags = { ...email.flags.toObject ? email.flags.toObject() : email.flags };
         emailCopy.flags.recent = true; // Mark as recent in new mailbox
 
@@ -1251,13 +1342,14 @@ class IMAPServer {
     try {
       const messageSet = args[0];
       const destMailbox = args[1].replace(/"/g, '');
+      const user = state.getUser();
       const sourceMailbox = state.getMailbox() || 'INBOX';
 
       const messageNumbers = this.parseMessageSet(messageSet);
       const movedUids = [];
 
       for (const msgNum of messageNumbers) {
-        const email = await this.getEmailBySequence(sourceMailbox, msgNum);
+        const email = await this.getEmailBySequence(user, sourceMailbox, msgNum);
 
         if (!email) continue;
 
@@ -1265,7 +1357,7 @@ class IMAPServer {
 
         // Move email to new mailbox
         email.mailbox = destMailbox;
-        email.uid = await this.getNextUID(destMailbox);
+        email.uid = await this.getNextUID(user, destMailbox);
         email.flags.recent = true; // Mark as recent in new mailbox
 
         await email.save();
@@ -1283,10 +1375,12 @@ class IMAPServer {
   async handleExpunge(socket, args, state, tag) {
     try {
       const user = state.getUser();
+      const mailbox = state.getMailbox() || 'INBOX';
 
-      // Find and delete all messages marked as deleted for this user
+      // Find and delete all messages marked as deleted for this user in this mailbox
       const deletedEmails = await Email.find({
         authenticatedUsername: user,
+        mailbox: mailbox,
         'flags.deleted': true
       }).sort({ internalDate: 1 });
 
@@ -1312,8 +1406,10 @@ class IMAPServer {
     try {
       // Perform implicit EXPUNGE
       const user = state.getUser();
+      const mailbox = state.getMailbox() || 'INBOX';
       await Email.deleteMany({
         authenticatedUsername: user,
+        mailbox: mailbox,
         'flags.deleted': true
       });
 
@@ -1338,8 +1434,8 @@ class IMAPServer {
 
       const response = [];
 
-      // Query by user, not by mailbox (ignore folders)
-      const userQuery = this.getUserEmailQuery(user);
+      // Query by user and mailbox
+      const userQuery = this.getUserEmailQuery(user, mailbox);
 
       for (const item of statusItems) {
         switch (item.toUpperCase()) {
@@ -1383,6 +1479,7 @@ class IMAPServer {
   async handleAppend(socket, args, state, tag) {
     try {
       const mailbox = args[0].replace(/"/g, '');
+      const user = state.getUser();
 
       // Check for flags (optional)
       let flags = {};
@@ -1429,7 +1526,7 @@ class IMAPServer {
             mailbox,
             raw: literalData,
             internalDate: dateTime ? new Date(dateTime) : new Date(),
-            uid: await this.getNextUID(mailbox),
+            uid: await this.getNextUID(user, mailbox),
             flags: { ...flags, recent: true },
             status: 'received'
           });
@@ -1541,8 +1638,8 @@ class IMAPServer {
       const mailbox = (args[0] || 'INBOX').replace(/"/g, '');
       const user = state.getUser();
 
-      // Same as SELECT but read-only - get all user's emails
-      const emailCount = await Email.countDocuments(this.getUserEmailQuery(user));
+      // Same as SELECT but read-only - get emails in this mailbox
+      const emailCount = await Email.countDocuments(this.getUserEmailQuery(user, mailbox));
 
       state.setMailbox(mailbox);
       state.setState('SELECTED');

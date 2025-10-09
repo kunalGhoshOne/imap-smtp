@@ -160,9 +160,6 @@ class MultiPortSMTPServer {
         for (let line of lines) {
           line = line.trim();
 
-          // Skip empty lines
-          if (!line) continue;
-
         if (isDataMode) {
           if (line === '.') {
             isDataMode = false;
@@ -178,10 +175,19 @@ class MultiPortSMTPServer {
             sender = '';
             recipients = [];
           } else {
+            // Skip leading empty lines, but preserve empty lines after we've started collecting data
+            // (needed for headers/body separator)
+            if (rawData.length === 0 && line === '') {
+              // Skip leading blank lines
+              continue;
+            }
             rawData += line + '\r\n';
           }
           continue;
         }
+
+          // Skip empty lines when NOT in DATA mode
+          if (!line) continue;
 
         try {
           await this.handleSMTPCommand(socket, line, {

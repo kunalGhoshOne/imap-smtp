@@ -102,27 +102,29 @@ function sendTestEmail() {
           state = 'DATA_SENT';
         } else if (trimmedLine.startsWith('354')) {
           console.log('📤 Sending email content...');
-          const emailContent = `From: sender@gmail.com
-To: ${TEST_EMAIL}
-Subject: Test Email for User "${TEST_MAILBOX}"
-Date: ${new Date().toUTCString()}
-Message-ID: <test-${Date.now()}@gmail.com>
-
-Hello ${TEST_MAILBOX}!
-
-This is a test email sent to ${TEST_EMAIL}.
-
-If you can see this via IMAP when logging in with username "${TEST_MAILBOX}",
-then the email delivery system is working correctly!
-
-Your IMAP credentials:
-- Server: your-server-ip
-- Port: 143
-- Username: ${TEST_MAILBOX}
-- Password: ${TEST_PASSWORD}
-
-Best regards,
-Test Suite`;
+          const emailContent = [
+            `From: sender@gmail.com`,
+            `To: ${TEST_EMAIL}`,
+            `Subject: Test Email for User "${TEST_MAILBOX}"`,
+            `Date: ${new Date().toUTCString()}`,
+            `Message-ID: <test-${Date.now()}@gmail.com>`,
+            '', // Blank line between headers and body
+            `Hello ${TEST_MAILBOX}!`,
+            '',
+            `This is a test email sent to ${TEST_EMAIL}.`,
+            '',
+            `If you can see this via IMAP when logging in with username "${TEST_MAILBOX}",`,
+            `then the email delivery system is working correctly!`,
+            '',
+            `Your IMAP credentials:`,
+            `- Server: your-server-ip`,
+            `- Port: 143`,
+            `- Username: ${TEST_MAILBOX}`,
+            `- Password: ${TEST_PASSWORD}`,
+            '',
+            `Best regards,`,
+            `Test Suite`
+          ].join('\r\n');
           socket.write(emailContent + '\r\n.\r\n');
           state = 'EMAIL_SENT';
         } else if (trimmedLine.startsWith('250') && state === 'EMAIL_SENT') {
