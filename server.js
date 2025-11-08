@@ -6,6 +6,7 @@ const LMTPServer = require('./services/LMTPServer');
 const QueueAPI = require('./services/QueueAPI');
 const DatabaseWatcher = require('./services/DatabaseWatcher');
 const MailboxAPI = require('./services/MailboxAPI');
+const RspamdService = require('./services/RspamdService');
 const logger = require('./utils/logger');
 
 class Application {
@@ -22,11 +23,25 @@ class Application {
     try {
       // Connect to database
       await database.connect();
-      
+
+      // Check rspamd health if enabled
+      if (RspamdService.enabled) {
+        logger.info('Rspamd is enabled, performing health check...');
+        const healthy = await RspamdService.healthCheck();
+
+        if (healthy) {
+          logger.info('✅ Rspamd health check passed');
+        } else {
+          logger.warn('⚠️ Rspamd health check failed - rspamd may not be available');
+          logger.warn('⚠️ Emails will be accepted without spam filtering (fail-open mode)');
+          logger.warn('⚠️ Please ensure rspamd is running and accessible');
+        }
+      }
+
       // Start Database Watcher
       DatabaseWatcher.startWatching();
       await DatabaseWatcher.processExistingPendingEmails();
-      
+
       // Start Multi-Port SMTP server
       this.multiPortSMTPServer = new MultiPortSMTPServer();
       this.multiPortSMTPServer.start();
@@ -88,13 +103,19 @@ class Application {
       if (this.mailboxAPI) {
         this.mailboxAPI.stop();
       }
-      
+
       // Stop Database Watcher
       DatabaseWatcher.stop();
-      
+
+      // Cleanup rspamd connection pool
+      if (RspamdService.enabled) {
+        logger.info('Cleaning up rspamd resources...');
+        RspamdService.destroy();
+      }
+
       // Disconnect from database
       await database.disconnect();
-      
+
       logger.info('✅ Application stopped gracefully');
       process.exit(0);
     } catch (error) {

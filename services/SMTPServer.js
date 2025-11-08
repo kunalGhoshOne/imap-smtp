@@ -1,5 +1,6 @@
 const net = require('net');
 const EmailProcessor = require('./EmailProcessor');
+const RspamdService = require('./RspamdService');
 const logger = require('../utils/logger');
 
 class SMTPServer {
@@ -37,6 +38,8 @@ class SMTPServer {
     let recipients = [];
     let rawData = '';
     let isDataMode = false;
+    let clientIp = socket.remoteAddress;
+    let helo = '';
 
     // Send welcome message
     socket.write('220 Custom Node MTA Ready\r\n');
@@ -50,8 +53,12 @@ class SMTPServer {
         if (isDataMode) {
           if (line === '.') {
             isDataMode = false;
-            await this.handleEmailData(socket, sender, recipients, rawData);
-            
+            await this.handleEmailData(socket, sender, recipients, rawData, {
+              ip: clientIp,
+              helo: helo,
+              mailType: 'inbound'
+            });
+
             // Reset state
             rawData = '';
             sender = '';
@@ -65,7 +72,9 @@ class SMTPServer {
         this.handleSMTPCommand(socket, line, {
           setSender: (s) => { sender = s; },
           addRecipient: (r) => { recipients.push(r); },
-          setDataMode: (mode) => { isDataMode = mode; }
+          clearRecipients: () => { recipients = []; },
+          setDataMode: (mode) => { isDataMode = mode; },
+          setHelo: (h) => { helo = h; }
         });
       }
     });
@@ -81,6 +90,10 @@ class SMTPServer {
 
   handleSMTPCommand(socket, line, state) {
     if (line.startsWith('HELO') || line.startsWith('EHLO')) {
+      const parts = line.split(' ');
+      if (parts.length > 1) {
+        state.setHelo(parts[1]);
+      }
       socket.write('250 Hello\r\n');
     } else if (line.startsWith('MAIL FROM:')) {
       const sender = line.slice(10).replace(/[<>]/g, '').trim();
@@ -107,7 +120,7 @@ class SMTPServer {
     } else if (line === 'RSET') {
       // Reset the current transaction
       state.setSender('');
-      state.addRecipient = () => {}; // Clear recipients
+      state.clearRecipients(); // Clear recipients array
       state.setDataMode(false);
       socket.write('250 OK\r\n');
     } else {
@@ -115,9 +128,76 @@ class SMTPServer {
     }
   }
 
-  async handleEmailData(socket, sender, recipients, rawData) {
+  async handleEmailData(socket, sender, recipients, rawData, options = {}) {
     try {
-      await EmailProcessor.processEmail(sender, recipients, rawData);
+      // Determine mail type (inbound vs outbound)
+      const mailType = options.mailType || 'inbound';
+
+      // Use separate variable for processed data to avoid mutation issues
+      let processedData = rawData;
+
+      // Check if rspamd scanning is enabled for this mail type
+      if (RspamdService.isEnabled(mailType)) {
+        logger.info('Scanning email with rspamd', {
+          sender,
+          recipients,
+          mailType
+        });
+
+        // Scan email with rspamd
+        const scanResult = await RspamdService.scanEmail(rawData, {
+          sender,
+          recipients,
+          ip: options.ip,
+          helo: options.helo,
+          hostname: options.hostname
+        });
+
+        // Get action based on scan result
+        const action = RspamdService.getAction(scanResult);
+
+        logger.info('Rspamd scan action', {
+          action: action.action,
+          reason: action.reason,
+          score: action.score,
+          sender,
+          recipients
+        });
+
+        // Handle reject action
+        if (action.action === 'reject') {
+          logger.warn('Email rejected by rspamd', {
+            sender,
+            recipients,
+            score: action.score,
+            threshold: action.threshold
+          });
+          socket.write(action.message + '\r\n');
+          return;
+        }
+
+        // Handle greylist action
+        if (action.action === 'greylist') {
+          logger.info('Email greylisted by rspamd', {
+            sender,
+            recipients,
+            score: action.score,
+            threshold: action.threshold
+          });
+          socket.write(action.message + '\r\n');
+          return;
+        }
+
+        // Add spam headers if needed
+        if (action.addHeaders) {
+          const headers = RspamdService.generateHeaders(scanResult);
+          processedData = headers + rawData;
+          logger.debug('Added spam headers to email');
+        }
+      }
+
+      // Process email normally with processed data
+      await EmailProcessor.processEmail(sender, recipients, processedData);
       socket.write('250 Message accepted\r\n');
     } catch (error) {
       logger.error('❌ Save failed:', error.message);

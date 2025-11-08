@@ -51,6 +51,7 @@ smtp-nodejs/
 - **SMTP Protocol Support**: Full SMTP command handling (HELO, MAIL FROM, RCPT TO, DATA, QUIT, RSET)
 - **IMAP Protocol Support**: Complete IMAP implementation with modular command handlers
 - **LMTP Protocol Support**: Local mail transfer protocol implementation
+- **🛡️ Rspamd Spam Filtering**: Real-time spam detection for inbound and outbound email
 - **Email Processing**: MIME parsing with attachment support
 - **Multi-Port SMTP**: Support for ports 25 (forwarding), 587 (STARTTLS), and 465 (SSL)
 - **IMAP Server**: Support for ports 143 (no SSL) and 993 (SSL) for email retrieval
@@ -160,6 +161,18 @@ FALLBACK_IP=1.2.3.4
 # Logging Configuration
 LOG_LEVEL=info
 ENABLE_CONSOLE_LOG=true
+
+# Rspamd Spam Filtering Configuration
+RSPAMD_ENABLED=false
+RSPAMD_INBOUND_ENABLED=false
+RSPAMD_OUTBOUND_ENABLED=false
+RSPAMD_HOST=localhost
+RSPAMD_PORT=11333
+RSPAMD_TIMEOUT=10000
+RSPAMD_REJECT_THRESHOLD=15
+RSPAMD_GREYLIST_THRESHOLD=6
+RSPAMD_ADD_HEADER_THRESHOLD=4
+RSPAMD_PASSWORD=changeme
 ```
 
 ## 🏃‍♂️ Running the Server
@@ -223,6 +236,199 @@ All endpoints require the API key in the `x-api-key` header or `api_key` query p
     "newPassword": "newpassword"
   }
   ```
+
+## 🛡️ Rspamd Spam Filtering
+
+This server includes built-in integration with [Rspamd](https://rspamd.com/), a fast, free, and open-source spam filtering system.
+
+### Features
+
+- **Real-time Spam Detection**: Scans emails before delivery or acceptance
+- **Inbound Protection**: Filter spam from incoming emails (port 25, LMTP)
+- **Outbound Protection**: Prevent compromised accounts from sending spam (ports 587, 465)
+- **Flexible Actions**: Reject, greylist, or tag emails based on spam score
+- **Spam Headers**: Add X-Spam-* headers for client-side filtering
+- **Performance**: Connection pooling and efficient scanning
+- **Fail-Open**: Accepts emails if rspamd is unavailable (configurable)
+- **Health Monitoring**: Automatic health checks on startup
+- **Metrics**: Built-in metrics for monitoring scan success rates
+
+### Quick Start
+
+1. **Enable Rspamd in docker-compose:**
+
+   Rspamd is already included in the docker-compose.yml file. Just start the services:
+
+   ```bash
+   docker-compose up -d
+   ```
+
+2. **Configure Rspamd filtering:**
+
+   Update your `.env` file:
+
+   ```env
+   # Enable rspamd globally
+   RSPAMD_ENABLED=true
+
+   # Enable for incoming mail (port 25, LMTP)
+   RSPAMD_INBOUND_ENABLED=true
+
+   # Enable for outgoing mail (ports 587, 465)
+   RSPAMD_OUTBOUND_ENABLED=true
+
+   # Rspamd server (use 'rspamd' for Docker, 'localhost' for local)
+   RSPAMD_HOST=rspamd
+
+   # Configure thresholds
+   RSPAMD_REJECT_THRESHOLD=15      # Reject if score >= 15
+   RSPAMD_GREYLIST_THRESHOLD=6     # Greylist if score >= 6
+   RSPAMD_ADD_HEADER_THRESHOLD=4   # Add headers if score >= 4
+   ```
+
+3. **Restart the application:**
+
+   ```bash
+   docker-compose restart app
+   ```
+
+### How It Works
+
+```
+Incoming Email → Rspamd Scan → Score Check → Action
+                                            ├─ Score >= 15: Reject (550)
+                                            ├─ Score >= 6:  Greylist (451)
+                                            ├─ Score >= 4:  Accept + Headers
+                                            └─ Score < 4:   Accept (clean)
+```
+
+### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RSPAMD_ENABLED` | Master switch for rspamd | `false` |
+| `RSPAMD_INBOUND_ENABLED` | Scan incoming mail | `false` |
+| `RSPAMD_OUTBOUND_ENABLED` | Scan outgoing mail | `false` |
+| `RSPAMD_HOST` | Rspamd server hostname | `localhost` |
+| `RSPAMD_PORT` | Rspamd API port | `11333` |
+| `RSPAMD_TIMEOUT` | Request timeout (ms) | `10000` |
+| `RSPAMD_REJECT_THRESHOLD` | Score to reject email | `15` |
+| `RSPAMD_GREYLIST_THRESHOLD` | Score to greylist | `6` |
+| `RSPAMD_ADD_HEADER_THRESHOLD` | Score to add headers | `4` |
+| `RSPAMD_PASSWORD` | Web UI password | `changeme` |
+
+### Spam Actions
+
+**Reject (550 Error)**
+- Email is permanently rejected
+- Sender receives bounce message
+- Used for obvious spam (score >= 15)
+
+**Greylist (451 Error)**
+- Email is temporarily rejected
+- Legitimate servers will retry
+- Spammers typically don't retry
+- Used for suspicious emails (score >= 6)
+
+**Accept with Headers**
+- Email is accepted
+- X-Spam-* headers added
+- Users can filter on client side
+- Used for borderline spam (score >= 4)
+
+**Accept Clean**
+- Email is accepted without modification
+- No spam detected (score < 4)
+
+### Added Headers
+
+When spam is detected, the following headers are added:
+
+```
+X-Spam-Status: Yes, score=12.50 required=15.00
+X-Spam-Score: 12.50
+X-Spam-Level: ************
+X-Spam-Action: add header
+X-Spam-Symbols: SYMBOL1(5.00), SYMBOL2(7.50)
+```
+
+### Mail Type Detection
+
+The system automatically determines whether email is inbound or outbound:
+
+- **Inbound**: Port 25 (unauthenticated) or LMTP
+- **Outbound**: Ports 587/465 (authenticated SMTP)
+
+### Rspamd Web Interface
+
+Access the rspamd web UI at: `http://localhost:11334`
+
+- Username: `admin`
+- Password: Set via `RSPAMD_PASSWORD` environment variable
+
+### Monitoring
+
+Check rspamd integration status:
+
+```bash
+# View rspamd logs
+docker-compose logs rspamd
+
+# Check rspamd health
+curl http://localhost:11334/ping
+
+# View application logs for rspamd activity
+docker-compose logs app | grep -i rspamd
+```
+
+### Troubleshooting
+
+**Rspamd not scanning emails:**
+1. Check if rspamd is running: `docker-compose ps rspamd`
+2. Verify `RSPAMD_ENABLED=true` in your `.env`
+3. Check application logs for rspamd health check status
+4. Verify `RSPAMD_HOST` is correct (use `rspamd` for Docker)
+
+**All emails being rejected:**
+1. Thresholds might be too low
+2. Increase `RSPAMD_REJECT_THRESHOLD` to 20+
+3. Check rspamd logs for scoring details
+
+**Rspamd unavailable:**
+- System operates in fail-open mode
+- Emails are accepted without scanning
+- Warning logged on startup
+- Fix rspamd and restart application
+
+### Advanced Configuration
+
+For advanced rspamd configuration, mount custom config files:
+
+```yaml
+# docker-compose.yml
+volumes:
+  - ./rspamd/local.d:/etc/rspamd/local.d
+  - ./rspamd/override.d:/etc/rspamd/override.d
+```
+
+See [Rspamd Documentation](https://rspamd.com/doc/) for advanced options.
+
+### Performance
+
+- **Connection Pooling**: Reuses HTTP connections (maxSockets: 50)
+- **Timeout Protection**: 10-second timeout per scan
+- **Response Limits**: 1MB max response size
+- **Health Checks**: Automatic health monitoring
+- **Metrics**: Success rate tracking
+
+### Security
+
+- **Inbound Protection**: Blocks spam from reaching users
+- **Outbound Protection**: Prevents your server from sending spam
+- **Account Protection**: Detects compromised accounts
+- **Reputation**: Maintains server reputation by blocking outbound spam
+
+---
 
 ## 📨 Incoming Email Delivery
 
@@ -525,6 +731,17 @@ Dynamic IP selection:
 - Caching mechanism for performance
 - Fallback IP support
 - Retry logic for API failures
+
+#### `RspamdService.js`
+Spam filtering integration:
+- Real-time spam scanning via rspamd HTTP API
+- Connection pooling for performance
+- Configurable thresholds (reject, greylist, add headers)
+- Automatic mail type detection (inbound/outbound)
+- Spam header generation
+- Health checking and metrics
+- Fail-open mode for availability
+- Input sanitization for security
 
 ### IMAP Commands Module (`services/imap/commands/`)
 

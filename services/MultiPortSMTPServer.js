@@ -6,6 +6,7 @@ const EmailProcessor = require('./EmailProcessor');
 const IncomingEmailProcessor = require('./IncomingEmailProcessor');
 const SMTPForwarder = require('./SMTPForwarder');
 const SMTPAuthService = require('./SMTPAuthService');
+const RspamdService = require('./RspamdService');
 const logger = require('../utils/logger');
 
 class MultiPortSMTPServer {
@@ -149,6 +150,8 @@ class MultiPortSMTPServer {
     let startTLSUpgraded = false;
     let authState = 'none'; // none, waiting_username, waiting_password
     let authUsername = null;
+    let clientIp = socket.remoteAddress;
+    let helo = '';
 
     // Send welcome message
     socket.write('220 Multi-Port SMTP Server Ready\r\n');
@@ -164,7 +167,10 @@ class MultiPortSMTPServer {
           if (line === '.') {
             isDataMode = false;
             try {
-              await this.handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername);
+              await this.handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername, {
+                ip: clientIp,
+                helo: helo
+              });
             } catch (error) {
               logger.error('Error handling email data', { error: error.message, port });
               socket.write('550 Failed to process email\r\n');
@@ -193,9 +199,10 @@ class MultiPortSMTPServer {
           await this.handleSMTPCommand(socket, line, {
           setSender: (s) => { sender = s; },
           addRecipient: (r) => { recipients.push(r); },
+          clearRecipients: () => { recipients = []; },
           setDataMode: (mode) => { isDataMode = mode; },
-          setAuthenticated: (auth, username) => { 
-            isAuthenticated = auth; 
+          setAuthenticated: (auth, username) => {
+            isAuthenticated = auth;
             authenticatedUsername = username;
           },
           setStartTLS: (tls) => { supportsStartTLS = tls; },
@@ -207,7 +214,8 @@ class MultiPortSMTPServer {
           setAuthUsername: (username) => { authUsername = username; },
           getAuthUsername: () => authUsername,
           isAuthenticated: () => isAuthenticated,
-          getAuthenticatedUsername: () => authenticatedUsername
+          getAuthenticatedUsername: () => authenticatedUsername,
+          setHelo: (h) => { helo = h; }
         }, mode, port);
         } catch (error) {
           logger.error('Error handling SMTP command', { error: error.message, port, line });
@@ -270,7 +278,8 @@ class MultiPortSMTPServer {
 
     if (line.startsWith('HELO') || line.startsWith('EHLO')) {
       const domain = line.split(' ')[1] || 'localhost';
-      
+      state.setHelo(domain);
+
       if (line.startsWith('EHLO')) {
         // Extended HELO - advertise capabilities
         socket.write('250-Hello\r\n');
@@ -286,25 +295,121 @@ class MultiPortSMTPServer {
         socket.write('250 Hello\r\n');
       }
     } else if (line === 'STARTTLS' && mode === 'starttls' && !state.isStartTLSUpgraded()) {
+      // Send ready response before upgrade
       socket.write('220 Ready to start TLS\r\n');
-      
-      // Upgrade the connection to TLS
+
+      // Get SSL options for TLS upgrade
       const tlsOptions = this.getSSLOptions();
-      const tlsSocket = tls.connect({
-        socket: socket,
-        ...tlsOptions
-      });
+      if (tlsOptions === null) {
+        logger.error('Cannot perform STARTTLS: SSL options not available');
+        socket.write('454 TLS not available\r\n');
+        return;
+      }
 
-      tlsSocket.on('secure', () => {
-        logger.info('🔒 TLS connection established');
+      try {
+        // Create TLS socket wrapping the existing socket (server-side)
+        const tlsSocket = new tls.TLSSocket(socket, {
+          isServer: true,
+          server: this.servers.get(port).server,
+          ...tlsOptions
+        });
+
+        // Mark as upgraded
         state.upgradeToTLS();
-        // Re-send welcome message after TLS upgrade
-        tlsSocket.write('220 Multi-Port SMTP Server Ready (TLS)\r\n');
-      });
 
-      tlsSocket.on('error', (error) => {
-        logger.error('TLS upgrade failed', { error: error.message });
-      });
+        // Transfer all event listeners from old socket to TLS socket
+        // Note: The connection state variables are already in closure scope
+
+        // Remove old data listener to prevent duplicate handling
+        socket.removeAllListeners('data');
+
+        // Set up TLS socket event handlers
+        tlsSocket.on('secure', () => {
+          logger.info('🔒 TLS upgrade completed successfully', { port });
+        });
+
+        tlsSocket.on('error', (error) => {
+          logger.error('TLS socket error', { error: error.message, port });
+          try {
+            tlsSocket.destroy();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        });
+
+        // Replace the socket reference in the state with TLS socket
+        // by handling data on the TLS socket instead
+        tlsSocket.on('data', async (chunk) => {
+          try {
+            const lines = chunk.toString().split(/\r?\n/);
+
+            for (let line of lines) {
+              line = line.trim();
+
+            if (isDataMode) {
+              if (line === '.') {
+                isDataMode = false;
+                try {
+                  await this.handleEmailData(tlsSocket, sender, recipients, rawData, mode, port, authenticatedUsername, {
+                    ip: clientIp,
+                    helo: helo
+                  });
+                } catch (error) {
+                  logger.error('Error handling email data', { error: error.message, port });
+                  tlsSocket.write('550 Failed to process email\r\n');
+                }
+
+                // Reset state
+                rawData = '';
+                sender = '';
+                recipients = [];
+              } else {
+                if (rawData.length === 0 && line === '') {
+                  continue;
+                }
+                rawData += line + '\r\n';
+              }
+              continue;
+            }
+
+              if (!line) continue;
+
+            try {
+              await this.handleSMTPCommand(tlsSocket, line, state, mode, port);
+            } catch (error) {
+              logger.error('Error handling SMTP command', { error: error.message, port, line });
+              try {
+                tlsSocket.write('550 Internal server error\r\n');
+              } catch (writeError) {
+                logger.error('Error writing to socket after command error', { error: writeError.message, port });
+              }
+            }
+          }
+          } catch (error) {
+            logger.error('Error processing socket data', { error: error.message, port });
+            try {
+              tlsSocket.write('550 Internal server error\r\n');
+            } catch (writeError) {
+              logger.error('Error writing to socket', { error: writeError.message, port });
+            }
+          }
+        });
+
+        tlsSocket.on('end', () => {
+          logger.info(`❌ Client disconnected from port ${port} (TLS)`);
+        });
+
+      } catch (error) {
+        logger.error('STARTTLS upgrade failed', { error: error.message, port });
+        try {
+          socket.write('454 TLS not available\r\n');
+        } catch (e) {
+          // Socket might already be closed
+        }
+      }
+
+      // Don't process any more commands on the plain socket
+      return;
 
     } else if (line.startsWith('AUTH')) {
       // Handle authentication
@@ -370,7 +475,7 @@ class MultiPortSMTPServer {
     } else if (line === 'RSET') {
       // Reset the current transaction
       state.setSender('');
-      state.addRecipient = () => {}; // Clear recipients
+      state.clearRecipients(); // Clear recipients array
       state.setDataMode(false);
       socket.write('250 OK\r\n');
     } else {
@@ -378,19 +483,106 @@ class MultiPortSMTPServer {
     }
   }
 
-  async handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername) {
+  async handleEmailData(socket, sender, recipients, rawData, mode, port, authenticatedUsername, options = {}) {
     try {
+      // Determine mail type based on authentication and port
+      let mailType = 'inbound';
+
+      if (authenticatedUsername) {
+        // Authenticated connections are always outbound
+        mailType = 'outbound';
+      } else if (port === 587 || port === 465) {
+        // Submission ports without auth - this shouldn't normally happen
+        // but treat as outbound and let the auth check elsewhere handle it
+        logger.warn('Unauthenticated mail on submission port', { port, sender });
+        mailType = 'outbound';
+      } else if (port === 25) {
+        // Port 25 without auth is inbound
+        mailType = 'inbound';
+      }
+
+      // Use separate variable for processed data to avoid mutation issues
+      let processedData = rawData;
+
+      // Check if rspamd scanning is enabled for this mail type
+      if (RspamdService.isEnabled(mailType)) {
+        logger.info('Scanning email with rspamd', {
+          sender,
+          recipients,
+          mailType,
+          port,
+          authenticated: !!authenticatedUsername
+        });
+
+        // Scan email with rspamd
+        const scanResult = await RspamdService.scanEmail(rawData, {
+          sender,
+          recipients,
+          ip: options.ip,
+          helo: options.helo
+        });
+
+        // Get action based on scan result
+        const action = RspamdService.getAction(scanResult);
+
+        logger.info('Rspamd scan action', {
+          action: action.action,
+          reason: action.reason,
+          score: action.score,
+          sender,
+          recipients,
+          mailType,
+          port
+        });
+
+        // Handle reject action
+        if (action.action === 'reject') {
+          logger.warn('Email rejected by rspamd', {
+            sender,
+            recipients,
+            score: action.score,
+            threshold: action.threshold,
+            mailType,
+            port
+          });
+          socket.write(action.message + '\r\n');
+          return;
+        }
+
+        // Handle greylist action
+        if (action.action === 'greylist') {
+          logger.info('Email greylisted by rspamd', {
+            sender,
+            recipients,
+            score: action.score,
+            threshold: action.threshold,
+            mailType,
+            port
+          });
+          socket.write(action.message + '\r\n');
+          return;
+        }
+
+        // Add spam headers if needed
+        if (action.addHeaders) {
+          const headers = RspamdService.generateHeaders(scanResult);
+          processedData = headers + rawData;
+          logger.debug('Added spam headers to email');
+        }
+      }
+
+      // Process email based on mode with processed data
       if (mode === 'forward' && this.forwarder) {
         // Forward email to external SMTP service
-        await this.forwarder.forwardEmail(sender, recipients, rawData);
+        await this.forwarder.forwardEmail(sender, recipients, processedData);
         socket.write('250 Message forwarded successfully\r\n');
       } else if (authenticatedUsername) {
         // Authenticated user - process as outgoing email
-        await EmailProcessor.processEmail(sender, recipients, rawData, authenticatedUsername);
+        await EmailProcessor.processEmail(sender, recipients, processedData, authenticatedUsername);
         socket.write('250 Message accepted for delivery\r\n');
       } else {
         // Unauthenticated user - process as incoming email
-        await IncomingEmailProcessor.processIncomingEmail(sender, recipients, rawData, 'SMTP');
+        await IncomingEmailProcessor.processIncomingEmail(sender, recipients, processedData, 'SMTP');
         socket.write('250 Message accepted\r\n');
       }
     } catch (error) {

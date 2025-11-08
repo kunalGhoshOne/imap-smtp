@@ -61,8 +61,20 @@ services:
       - IP_SELECTION_TIMEOUT=5000
       - IP_SELECTION_RETRIES=3
       - FALLBACK_IP=127.0.0.1
+
+      # Rspamd Configuration
+      - RSPAMD_ENABLED=false
+      - RSPAMD_INBOUND_ENABLED=false
+      - RSPAMD_OUTBOUND_ENABLED=false
+      - RSPAMD_HOST=rspamd
+      - RSPAMD_PORT=11333
+      - RSPAMD_TIMEOUT=10000
+      - RSPAMD_REJECT_THRESHOLD=15
+      - RSPAMD_GREYLIST_THRESHOLD=6
+      - RSPAMD_ADD_HEADER_THRESHOLD=4
     depends_on:
       - mongo
+      - rspamd
     # For multi-IP support, use host networking (Linux only)
     # network_mode: host
     # If you do NOT need multi-IP, you can use bridge mode and map ports:
@@ -91,5 +103,27 @@ services:
     ports:
       - "27017:27017"
 
+  rspamd:
+    image: rspamd/rspamd:3.7.4
+    container_name: smtp-rspamd
+    restart: always
+    volumes:
+      - rspamd_data:/var/lib/rspamd
+      - rspamd_conf:/etc/rspamd/local.d
+    ports:
+      - "11333:11333"  # Normal worker
+      - "11334:11334"  # Controller
+    environment:
+      - RSPAMD_PASSWORD=${RSPAMD_PASSWORD:-changeme}
+    hostname: rspamd
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11334/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 volumes:
   mongo_data:
+  rspamd_data:
+  rspamd_conf:
