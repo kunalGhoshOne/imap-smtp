@@ -5,6 +5,7 @@ const path = require('path');
 const config = require('../config/config');
 const database = require('../config/database');
 const Email = require('../models/Email');
+const RspamdService = require('./RspamdService');
 const logger = require('../utils/logger');
 
 class LMTPServer {
@@ -79,7 +80,9 @@ class LMTPServer {
       state: 'INIT',
       currentEmail: null,
       buffer: '',
-      id: Math.random().toString(36).substr(2, 9)
+      id: Math.random().toString(36).substr(2, 9),
+      clientIp: socket.remoteAddress,
+      hostname: null
     };
 
     this.connections.add(connection);
@@ -154,7 +157,7 @@ class LMTPServer {
   }
 
   handleLHLO(connection, args) {
-    if (connection.state !== 'INIT') {
+    if (connection.state !== 'INIT' && connection.state !== 'READY') {
       this.sendResponse(connection.socket, '503', 'Bad sequence of commands');
       return;
     }
@@ -166,7 +169,7 @@ class LMTPServer {
 
     connection.state = 'READY';
     connection.hostname = args[0];
-    
+
     this.sendResponse(connection.socket, '250', `Hello ${args[0]}, LMTP server ready`);
   }
 
@@ -252,11 +255,82 @@ class LMTPServer {
 
   async saveEmail(connection) {
     try {
+      const rawEmailData = connection.currentEmail.data;
+
+      // Use separate variable for processed data to avoid mutation issues
+      let processedData = rawEmailData;
+
+      // Check if rspamd scanning is enabled for LMTP (inbound mail)
+      if (RspamdService.isEnabled('lmtp')) {
+        logger.info('Scanning LMTP email with rspamd', {
+          from: connection.currentEmail.from,
+          to: connection.currentEmail.to,
+          connectionId: connection.id
+        });
+
+        // Scan email with rspamd
+        const scanResult = await RspamdService.scanEmail(rawEmailData, {
+          sender: connection.currentEmail.from,
+          recipients: connection.currentEmail.to,
+          ip: connection.clientIp,
+          hostname: connection.hostname
+        });
+
+        // Get action based on scan result
+        const action = RspamdService.getAction(scanResult);
+
+        logger.info('Rspamd scan action for LMTP', {
+          action: action.action,
+          reason: action.reason,
+          score: action.score,
+          from: connection.currentEmail.from,
+          to: connection.currentEmail.to,
+          connectionId: connection.id
+        });
+
+        // Handle reject action
+        if (action.action === 'reject') {
+          logger.warn('LMTP email rejected by rspamd', {
+            from: connection.currentEmail.from,
+            to: connection.currentEmail.to,
+            score: action.score,
+            threshold: action.threshold,
+            connectionId: connection.id
+          });
+          return false; // Will trigger 550 error response
+        }
+
+        // Handle greylist action
+        // Note: LMTP is for final local delivery (MDA), not MTA relay
+        // Greylisting is an MTA concept that requires temporary rejection
+        // For LMTP, we accept the email but add appropriate headers
+        if (action.action === 'greylist') {
+          logger.info('LMTP email has greylist score, accepting with headers (LMTP does not defer)', {
+            from: connection.currentEmail.from,
+            to: connection.currentEmail.to,
+            score: action.score,
+            threshold: action.greylistThreshold,
+            connectionId: connection.id
+          });
+          // Force adding headers for greylisted emails in LMTP
+          action.addHeaders = true;
+        }
+
+        // Add spam headers if needed
+        if (action.addHeaders) {
+          const headers = RspamdService.generateHeaders(scanResult);
+          processedData = headers + rawEmailData;
+          logger.debug('Added spam headers to LMTP email', {
+            connectionId: connection.id
+          });
+        }
+      }
+
       const email = new Email({
         from: connection.currentEmail.from,
         to: connection.currentEmail.to,
-        subject: this.extractSubject(connection.currentEmail.data),
-        body: connection.currentEmail.data,
+        subject: this.extractSubject(processedData),
+        body: processedData,
         receivedAt: connection.currentEmail.receivedAt,
         source: 'LMTP',
         status: 'received'
@@ -264,7 +338,7 @@ class LMTPServer {
 
       await email.save();
       logger.info(`📧 LMTP email saved: ${email._id} from ${connection.currentEmail.from} to ${connection.currentEmail.to.join(', ')}`);
-      
+
       return true;
     } catch (error) {
       logger.error('❌ Error saving LMTP email', error);
