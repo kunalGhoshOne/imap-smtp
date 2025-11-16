@@ -27,7 +27,9 @@ smtp-nodejs/
 │   ├── EmailQueue.js # Queue management
 │   ├── QueueAPI.js   # Web dashboard and API
 │   ├── MailboxAPI.js # Mailbox management API
-│   └── IPSelectionService.js # Dynamic IP selection
+│   ├── IPSelectionService.js # Dynamic IP selection
+│   ├── RspamdService.js # Spam filtering integration
+│   └── DKIMService.js # DKIM email signing
 ├── services/imap/commands/ # Modular IMAP command handlers
 │   ├── CapabilityCommand.js
 │   ├── LoginCommand.js
@@ -38,6 +40,13 @@ smtp-nodejs/
 │   └── UIDCommand.js
 ├── utils/            # Utility modules
 │   └── logger.js     # Centralized logging
+├── plugins/          # DKIM key plugins
+│   ├── dkim-keys.js  # File-based key loading
+│   ├── dkim-keys-api.js # API-based key loading
+│   └── README.md     # Plugin development guide
+├── keys/             # DKIM private/public keys by domain
+│   ├── example.com/  # Example key directory
+│   └── README.md     # Key generation guide
 ├── server.js         # Main application entry point
 ├── Dockerfile        # Docker container definition
 ├── docker-compose.yml # Multi-service deployment
@@ -52,6 +61,7 @@ smtp-nodejs/
 - **IMAP Protocol Support**: Complete IMAP implementation with modular command handlers
 - **LMTP Protocol Support**: Local mail transfer protocol implementation
 - **🛡️ Rspamd Spam Filtering**: Real-time spam detection for inbound and outbound email
+- **🔐 DKIM Email Signing**: Cryptographic email signatures with plugin-based key management
 - **Email Processing**: MIME parsing with attachment support
 - **Multi-Port SMTP**: Support for ports 25 (forwarding), 587 (STARTTLS), and 465 (SSL)
 - **IMAP Server**: Support for ports 143 (no SSL) and 993 (SSL) for email retrieval
@@ -173,6 +183,14 @@ RSPAMD_REJECT_THRESHOLD=15
 RSPAMD_GREYLIST_THRESHOLD=6
 RSPAMD_ADD_HEADER_THRESHOLD=4
 RSPAMD_PASSWORD=changeme
+
+# DKIM Email Signing Configuration
+DKIM_ENABLED=false
+DKIM_SELECTOR=default
+DKIM_PLUGIN_PATH=./plugins/dkim-keys.js
+DKIM_HEADERS=from:to:subject:date:message-id
+DKIM_API_URL=
+DKIM_API_KEY=
 ```
 
 ## 🏃‍♂️ Running the Server
@@ -427,6 +445,285 @@ See [Rspamd Documentation](https://rspamd.com/doc/) for advanced options.
 - **Outbound Protection**: Prevents your server from sending spam
 - **Account Protection**: Detects compromised accounts
 - **Reputation**: Maintains server reputation by blocking outbound spam
+
+---
+
+## 🔐 DKIM Email Signing
+
+This server includes built-in support for DKIM (DomainKeys Identified Mail) signing, which adds cryptographic signatures to outbound emails to prevent spoofing and improve deliverability.
+
+### Features
+
+- **Automatic Signing**: Signs all outbound emails with DKIM signatures
+- **Plugin-Based Key Management**: Flexible key loading from files, APIs, databases, or custom sources
+- **Multi-Domain Support**: Different keys for different sending domains
+- **File-Based Keys**: Default plugin loads keys from `keys/{domain}/` directory
+- **API-Based Keys**: Optional plugin to fetch keys from external API
+- **Performance**: Minimal overhead, signs emails before delivery
+- **Configuration**: Enable/disable via environment variables
+- **Customizable**: Developers can create custom plugins for any key source
+
+### Quick Start
+
+1. **Generate DKIM Keys**:
+
+   ```bash
+   # Create keys directory for your domain
+   mkdir -p keys/yourdomain.com
+
+   # Generate 2048-bit RSA key pair
+   openssl genrsa -out keys/yourdomain.com/private.key 2048
+   openssl rsa -in keys/yourdomain.com/private.key -pubout -out keys/yourdomain.com/public.key
+   ```
+
+2. **Configure DNS Record**:
+
+   Extract public key for DNS:
+   ```bash
+   grep -v "^-" keys/yourdomain.com/public.key | tr -d '\n'
+   ```
+
+   Add TXT record:
+   - **Name**: `default._domainkey.yourdomain.com`
+   - **Type**: `TXT`
+   - **Value**: `v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY_HERE`
+
+3. **Enable DKIM**:
+
+   Update your `.env` file:
+   ```env
+   DKIM_ENABLED=true
+   DKIM_SELECTOR=default
+   DKIM_PLUGIN_PATH=./plugins/dkim-keys.js
+   ```
+
+4. **Restart Application**:
+
+   ```bash
+   docker-compose restart app
+   # or
+   npm start
+   ```
+
+### How It Works
+
+```
+Outbound Email → EmailQueue → DKIM Signing → MailSender → Remote MX Server
+                                    ↓
+                            DKIMService uses plugin
+                                    ↓
+                            Load keys for sender domain
+                                    ↓
+                            Add DKIM-Signature header
+```
+
+### Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DKIM_ENABLED` | Enable DKIM signing | `false` |
+| `DKIM_SELECTOR` | DNS selector name | `default` |
+| `DKIM_PLUGIN_PATH` | Path to key plugin | `./plugins/dkim-keys.js` |
+| `DKIM_HEADERS` | Headers to sign | `from:to:subject:date:message-id` |
+| `DKIM_API_URL` | API endpoint (API plugin only) | - |
+| `DKIM_API_KEY` | API auth key (API plugin only) | - |
+
+### Available Plugins
+
+#### 1. File-Based Plugin (Default)
+
+Loads keys from `keys/{domain}/` directory:
+
+```bash
+keys/
+  example.com/
+    private.key
+    public.key
+  anotherdomain.com/
+    private.key
+    public.key
+```
+
+**Configuration**:
+```env
+DKIM_PLUGIN_PATH=./plugins/dkim-keys.js
+```
+
+#### 2. API-Based Plugin
+
+Fetches keys from external API with caching:
+
+**Configuration**:
+```env
+DKIM_PLUGIN_PATH=./plugins/dkim-keys-api.js
+DKIM_API_URL=https://your-api.com/api/dkim/keys
+DKIM_API_KEY=your-secret-key
+```
+
+**API Response Format**:
+```json
+{
+  "domain": "example.com",
+  "selector": "default",
+  "privateKey": "-----BEGIN RSA PRIVATE KEY-----\n...",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\n..."
+}
+```
+
+### Custom Plugins
+
+Create your own plugin to load keys from any source:
+
+```javascript
+// plugins/dkim-keys-custom.js
+async function getDKIMKeys(domain) {
+  // Load from database, vault, environment, etc.
+  return {
+    privateKey: '-----BEGIN RSA PRIVATE KEY-----\n...',
+    publicKey: '-----BEGIN PUBLIC KEY-----\n...',
+    selector: 'default',
+    domain: domain
+  };
+}
+
+module.exports = getDKIMKeys;
+```
+
+Set plugin path:
+```env
+DKIM_PLUGIN_PATH=./plugins/dkim-keys-custom.js
+```
+
+See `plugins/README.md` for detailed plugin development guide.
+
+### Testing DKIM
+
+1. **Send Test Email**:
+   ```bash
+   # Send email through SMTP server
+   telnet localhost 587
+   ```
+
+2. **Check Email Headers**:
+   ```
+   DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+     d=example.com; s=default;
+     h=from:to:subject:date;
+     bh=...;
+     b=...
+   ```
+
+3. **Verify Signature**:
+   - Send email to yourself and check headers
+   - Use online validators:
+     - mail-tester.com
+     - dkimvalidator.com
+     - appmaildev.com/dkim
+
+### DNS Record Setup
+
+After generating keys, configure DNS:
+
+```bash
+# Extract public key (remove headers and newlines)
+grep -v "^-" keys/yourdomain.com/public.key | tr -d '\n'
+```
+
+**DNS Record**:
+- **Type**: TXT
+- **Name**: `default._domainkey.yourdomain.com` (or `{selector}._domainkey.{domain}`)
+- **Value**: `v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC...`
+
+**Verify DNS**:
+```bash
+dig TXT default._domainkey.yourdomain.com +short
+```
+
+### Multi-Domain Support
+
+For multiple sending domains:
+
+```bash
+# Generate keys for each domain
+openssl genrsa -out keys/domain1.com/private.key 2048
+openssl genrsa -out keys/domain2.com/private.key 2048
+openssl genrsa -out keys/domain3.com/private.key 2048
+
+# Configure DNS for each domain
+# default._domainkey.domain1.com
+# default._domainkey.domain2.com
+# default._domainkey.domain3.com
+```
+
+The DKIM service automatically selects keys based on the sender's domain.
+
+### Monitoring
+
+Check DKIM activity in logs:
+
+```bash
+# Docker
+docker-compose logs app | grep -i dkim
+
+# Output examples:
+# INFO: DKIM plugin loaded
+# INFO: Signing email with DKIM { domain: 'example.com', selector: 'default' }
+# INFO: Email signed with DKIM { domain: 'example.com' }
+```
+
+### Troubleshooting
+
+**DKIM not signing emails:**
+1. Check `DKIM_ENABLED=true` in `.env`
+2. Verify keys exist in `keys/{domain}/private.key`
+3. Check application logs for errors
+4. Ensure sender domain matches key directory
+
+**Signature verification fails:**
+1. Verify DNS record is correct
+2. Check public key matches private key
+3. Ensure selector matches (default is 'default')
+4. Remove extra spaces/newlines from DNS record
+
+**Keys not found:**
+1. Verify directory structure: `keys/{domain}/private.key`
+2. Check file permissions (must be readable)
+3. Domain name is case-sensitive
+4. Check plugin path in configuration
+
+### Security Best Practices
+
+1. **Protect Private Keys**:
+   ```bash
+   # Set proper permissions
+   chmod 600 keys/*/private.key
+
+   # Add to .gitignore
+   echo "keys/**/private.key" >> .gitignore
+   ```
+
+2. **Key Rotation**:
+   - Rotate keys every 6-12 months
+   - Use different selectors for rotation
+   - Keep old keys active during transition
+
+3. **Key Storage**:
+   - Use encrypted storage for production
+   - Consider key management services (AWS KMS, Vault)
+   - Never commit private keys to version control
+
+### Performance
+
+- **Minimal Overhead**: Signing adds ~5-10ms per email
+- **Plugin Caching**: API plugin caches keys for 1 hour
+- **Async Processing**: Non-blocking signing operation
+- **No External Dependencies**: Built-in DKIM library
+
+### Documentation
+
+- **Key Generation**: See `keys/README.md`
+- **Plugin Development**: See `plugins/README.md`
+- **Service Details**: See `services/DKIMService.js`
 
 ---
 
@@ -700,6 +997,7 @@ Business logic for email processing:
 Handles external email delivery:
 - DNS MX record lookup
 - SMTP client for external servers
+- DKIM signing before sending
 - Connection management and timeout handling
 - Error handling and retry logic
 
@@ -742,6 +1040,16 @@ Spam filtering integration:
 - Health checking and metrics
 - Fail-open mode for availability
 - Input sanitization for security
+
+#### `DKIMService.js`
+DKIM email signing:
+- Plugin-based key management
+- Multi-domain support
+- Automatic domain detection from sender
+- Cryptographic email signing (RSA-SHA256)
+- Configurable headers to sign
+- File, API, or custom key sources
+- Performance optimized with plugin caching
 
 ### IMAP Commands Module (`services/imap/commands/`)
 

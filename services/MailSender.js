@@ -1,6 +1,7 @@
 const net = require('net');
 const dns = require('dns').promises;
 const IPSelectionService = require('./IPSelectionService');
+const DKIMService = require('./DKIMService');
 const logger = require('../utils/logger');
 
 class MailSender {
@@ -10,18 +11,21 @@ class MailSender {
 
   async sendEmail(emailData) {
     const { sender, recipients, raw } = emailData;
-    
+
     try {
+      // Sign email with DKIM if enabled
+      const signedEmail = await DKIMService.signEmail(raw, sender);
+
       // Get IP for this email
       const sourceIP = await IPSelectionService.getIPForEmail(emailData);
-      
+
       // Send to each recipient
       const results = [];
       for (const recipient of recipients) {
-        const result = await this.sendToRecipient(sender, recipient, raw, sourceIP);
+        const result = await this.sendToRecipient(sender, recipient, signedEmail, sourceIP);
         results.push(result);
       }
-      
+
       return {
         success: results.every(r => r.success),
         results,

@@ -1,5 +1,6 @@
 const net = require('net');
 const tls = require('tls');
+const DKIMService = require('./DKIMService');
 const logger = require('../utils/logger');
 
 class SMTPForwarder {
@@ -17,8 +18,11 @@ class SMTPForwarder {
         smtpPort: this.config.smtpPort
       });
 
-      const result = await this.sendToExternalSMTP(sender, recipients, rawEmail);
-      
+      // Sign email with DKIM if enabled
+      const signedEmail = await DKIMService.signEmail(rawEmail, sender);
+
+      const result = await this.sendToExternalSMTP(sender, recipients, signedEmail);
+
       logger.info('✅ Email forwarded successfully', {
         sender,
         recipients,
